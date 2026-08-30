@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Stock Analysis - Home</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-surface": "#e1e2e7",
+                        "surface-dim": "#111417",
+                        "surface-container": "#1d2023",
+                        "surface-variant": "#323538",
+                        "surface-container-high": "#272a2e",
+                        "surface-container-lowest": "#0b0e11",
+                        "tertiary": "#afc8ff",
+                        "on-secondary": "#690003",
+                        "outline": "#86957e",
+                        "on-tertiary": "#002e69",
+                        "primary": "#3de530",
+                        "on-primary": "#003a00",
+                        "on-secondary-container": "#ffd2cc",
+                        "error-container": "#93000a",
+                        "tertiary-fixed-dim": "#adc6ff",
+                        "on-tertiary-fixed": "#001a41",
+                        "primary-container": "#00c805",
+                        "background": "#111417",
+                        "secondary": "#ffb4aa",
+                        "primary-fixed": "#77ff62",
+                        "surface-bright": "#37393d",
+                        "on-background": "#e1e2e7",
+                        "on-error-container": "#ffdad6",
+                        "outline-variant": "#3d4b37",
+                        "on-secondary-fixed-variant": "#930005",
+                        "error": "#ffb4ab",
+                        "secondary-fixed": "#ffdad5",
+                        "on-primary-fixed": "#002200",
+                        "on-tertiary-fixed-variant": "#004493",
+                        "on-surface-variant": "#bbcbb2",
+                        "inverse-on-surface": "#2e3134",
+                        "inverse-surface": "#e1e2e7",
+                        "tertiary-container": "#82acff",
+                        "primary-fixed-dim": "#3ce42f",
+                        "surface-container-low": "#191c1f",
+                        "secondary-fixed-dim": "#ffb4aa",
+                        "on-primary-container": "#004c00",
+                        "on-primary-fixed-variant": "#005300",
+                        "surface": "#111417",
+                        "on-tertiary-container": "#003e87",
+                        "inverse-primary": "#006e01",
+                        "surface-tint": "#3ce42f",
+                        "on-error": "#690005",
+                        "tertiary-fixed": "#d8e2ff",
+                        "on-secondary-fixed": "#410001",
+                        "surface-container-highest": "#323538",
+                        "secondary-container": "#c5020b"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter": "16px",
+                        "xs": "4px",
+                        "xl": "32px",
+                        "md": "16px",
+                        "base": "4px",
+                        "margin": "20px",
+                        "sm": "8px",
+                        "lg": "24px"
+                    },
+                    "fontFamily": {
+                        "headline-lg": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-md": ["Inter"],
+                        "headline-lg-mobile": ["Inter"],
+                        "body-md": ["Inter"],
+                        "display-lg": ["Inter"],
+                        "title-lg": ["Inter"],
+                        "label-md": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "headline-lg": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+                        "body-lg": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-md": ["24px", { "lineHeight": "32px", "fontWeight": "600" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "34px", "fontWeight": "600" }],
+                        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+                        "display-lg": ["40px", { "lineHeight": "48px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "title-lg": ["20px", { "lineHeight": "28px", "fontWeight": "500" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.02em", "fontWeight": "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body { background-color: #0B0E11; color: #e1e2e7; -webkit-font-smoothing: antialiased; }
+        .glass-panel { background: rgba(22, 27, 34, 0.7); backdrop-filter: blur(12px); border: 1px solid #30363D; }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+  </head>
+<body class="bg-surface-container-lowest font-body-md text-on-surface h-screen flex flex-col overflow-hidden">
+<!-- TopAppBar -->
+<header class="flex justify-between items-center w-full px-margin h-12 bg-surface-dim border-b border-outline-variant z-10 shrink-0">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary font-bold">monitoring</span>
+<span class="font-headline-md text-headline-md-mobile font-bold text-primary">AlphaStream</span>
+</div>
+<button class="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-variant/50 transition-colors">
+<span class="material-symbols-outlined text-on-surface-variant">search</span>
+</button>
+</header>
+<!-- Main Content Area -->
+<main class="flex-1 overflow-y-auto hide-scrollbar pb-24">
+<!-- Search Section -->
+<section class="px-margin pt-lg pb-md">
+<div class="relative group">
+<span class="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant">search</span>
+<input class="w-full bg-surface-container-high border border-outline-variant rounded-lg py-3 pl-10 pr-4 text-on-surface placeholder:text-on-surface-variant focus:outline-none focus:border-tertiary focus:ring-1 focus:ring-tertiary transition-all font-body-md" placeholder="Search markets, tickers..." type="text"/>
+<button class="absolute right-3 top-1/2 -translate-y-1/2 text-on-surface-variant hover:text-primary transition-colors">
+<span class="material-symbols-outlined text-[20px]">tune</span>
+</button>
+</div>
+</section>
+<!-- Market Overview (Bento style) -->
+<section class="px-margin pb-lg">
+<div class="grid grid-cols-2 gap-sm">
+<div class="glass-panel rounded-lg p-md flex flex-col justify-between">
+<div class="flex justify-between items-start mb-2">
+<span class="font-label-md text-label-md text-on-surface-variant">S&amp;P 500</span>
+<span class="material-symbols-outlined text-[16px] text-primary">trending_up</span>
+</div>
+<div>
+<div class="font-title-lg text-title-lg text-on-surface">5,123.41</div>
+<div class="font-label-md text-label-md text-primary mt-1">+0.82%</div>
+</div>
+</div>
+<div class="glass-panel rounded-lg p-md flex flex-col justify-between">
+<div class="flex justify-between items-start mb-2">
+<span class="font-label-md text-label-md text-on-surface-variant">NASDAQ</span>
+<span class="material-symbols-outlined text-[16px] text-primary">trending_up</span>
+</div>
+<div>
+<div class="font-title-lg text-title-lg text-on-surface">16,248.52</div>
+<div class="font-label-md text-label-md text-primary mt-1">+1.14%</div>
+</div>
+</div>
+</div>
+</section>
+<!-- Favorites List -->
+<section class="px-margin">
+<h2 class="font-title-lg text-title-lg text-on-surface mb-md">Favorites</h2>
+<div class="flex flex-col gap-sm">
+<!-- Stock Card 1 -->
+<div class="glass-panel rounded-lg p-md flex justify-between items-center hover:border-primary/50 transition-colors cursor-pointer">
+<div class="flex items-center gap-md">
+<div class="w-10 h-10 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant">
+<span class="font-headline-md text-headline-md-mobile text-on-surface">A</span>
+</div>
+<div>
+<div class="font-title-lg text-title-lg text-on-surface">AAPL</div>
+<div class="font-body-md text-body-md text-on-surface-variant">Apple Inc.</div>
+</div>
+</div>
+<div class="text-right">
+<div class="font-title-lg text-title-lg text-on-surface">$173.50</div>
+<div class="font-label-md text-label-md text-primary bg-primary-container/10 px-2 py-0.5 rounded-sm inline-block mt-1">+1.2%</div>
+</div>
+</div>
+<!-- Stock Card 2 -->
+<div class="glass-panel rounded-lg p-md flex justify-between items-center hover:border-primary/50 transition-colors cursor-pointer">
+<div class="flex items-center gap-md">
+<div class="w-10 h-10 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant">
+<span class="font-headline-md text-headline-md-mobile text-on-surface">T</span>
+</div>
+<div>
+<div class="font-title-lg text-title-lg text-on-surface">TSLA</div>
+<div class="font-body-md text-body-md text-on-surface-variant">Tesla, Inc.</div>
+</div>
+</div>
+<div class="text-right">
+<div class="font-title-lg text-title-lg text-on-surface">$202.64</div>
+<div class="font-label-md text-label-md text-error bg-error-container/20 px-2 py-0.5 rounded-sm inline-block mt-1">-0.5%</div>
+</div>
+</div>
+<!-- Stock Card 3 -->
+<div class="glass-panel rounded-lg p-md flex justify-between items-center hover:border-primary/50 transition-colors cursor-pointer">
+<div class="flex items-center gap-md">
+<div class="w-10 h-10 rounded-full bg-surface-variant flex items-center justify-center border border-outline-variant">
+<span class="font-headline-md text-headline-md-mobile text-on-surface">N</span>
+</div>
+<div>
+<div class="font-title-lg text-title-lg text-on-surface">NVDA</div>
+<div class="font-body-md text-body-md text-on-surface-variant">NVIDIA Corp.</div>
+</div>
+</div>
+<div class="text-right">
+<div class="font-title-lg text-title-lg text-on-surface">$822.79</div>
+<div class="font-label-md text-label-md text-primary bg-primary-container/10 px-2 py-0.5 rounded-sm inline-block mt-1">+3.4%</div>
+</div>
+</div>
+</div>
+</section>
+</main>
+<!-- BottomNavBar -->
+<nav class="fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-2 bg-surface-container-lowest border-t border-outline-variant shadow-lg md:hidden">
+<a class="flex flex-col items-center justify-center text-primary bg-primary-container/10 rounded-xl px-3 py-1 scale-90 duration-200" href="#">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">home</span>
+<span class="font-label-md text-label-md mt-1">Home</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined">star</span>
+<span class="font-label-md text-label-md mt-1">Favorites</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined">notifications</span>
+<span class="font-label-md text-label-md mt-1">Alerts</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined">person</span>
+<span class="font-label-md text-label-md mt-1">Profile</span>
+</a>
+</nav>
+</body></html>

@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Upgrade Subscription</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            "colors": {
+                    "on-surface": "#e1e2e7",
+                    "surface-dim": "#111417",
+                    "surface-container": "#1d2023",
+                    "surface-variant": "#323538",
+                    "surface-container-high": "#272a2e",
+                    "surface-container-lowest": "#0b0e11",
+                    "tertiary": "#afc8ff",
+                    "on-secondary": "#690003",
+                    "outline": "#86957e",
+                    "on-tertiary": "#002e69",
+                    "primary": "#3de530",
+                    "on-primary": "#003a00",
+                    "on-secondary-container": "#ffd2cc",
+                    "error-container": "#93000a",
+                    "tertiary-fixed-dim": "#adc6ff",
+                    "on-tertiary-fixed": "#001a41",
+                    "primary-container": "#00c805",
+                    "background": "#111417",
+                    "secondary": "#ffb4aa",
+                    "primary-fixed": "#77ff62",
+                    "surface-bright": "#37393d",
+                    "on-background": "#e1e2e7",
+                    "on-error-container": "#ffdad6",
+                    "outline-variant": "#3d4b37",
+                    "on-secondary-fixed-variant": "#930005",
+                    "error": "#ffb4ab",
+                    "secondary-fixed": "#ffdad5",
+                    "on-primary-fixed": "#002200",
+                    "on-tertiary-fixed-variant": "#004493",
+                    "on-surface-variant": "#bbcbb2",
+                    "inverse-on-surface": "#2e3134",
+                    "inverse-surface": "#e1e2e7",
+                    "tertiary-container": "#82acff",
+                    "primary-fixed-dim": "#3ce42f",
+                    "surface-container-low": "#191c1f",
+                    "secondary-fixed-dim": "#ffb4aa",
+                    "on-primary-container": "#004c00",
+                    "on-primary-fixed-variant": "#005300",
+                    "surface": "#111417",
+                    "on-tertiary-container": "#003e87",
+                    "inverse-primary": "#006e01",
+                    "surface-tint": "#3ce42f",
+                    "on-error": "#690005",
+                    "tertiary-fixed": "#d8e2ff",
+                    "on-secondary-fixed": "#410001",
+                    "surface-container-highest": "#323538",
+                    "secondary-container": "#c5020b"
+            },
+            "borderRadius": {
+                    "DEFAULT": "0.25rem",
+                    "lg": "0.5rem",
+                    "xl": "0.75rem",
+                    "full": "9999px"
+            },
+            "spacing": {
+                    "gutter": "16px",
+                    "xs": "4px",
+                    "xl": "32px",
+                    "md": "16px",
+                    "base": "4px",
+                    "margin": "20px",
+                    "sm": "8px",
+                    "lg": "24px"
+            },
+            "fontFamily": {
+                    "headline-lg": [
+                            "Inter"
+                    ],
+                    "body-lg": [
+                            "Inter"
+                    ],
+                    "headline-md": [
+                            "Inter"
+                    ],
+                    "headline-lg-mobile": [
+                            "Inter"
+                    ],
+                    "body-md": [
+                            "Inter"
+                    ],
+                    "display-lg": [
+                            "Inter"
+                    ],
+                    "title-lg": [
+                            "Inter"
+                    ],
+                    "label-md": [
+                            "JetBrains Mono"
+                    ]
+            },
+            "fontSize": {
+                    "headline-lg": [
+                            "32px",
+                            {
+                                    "lineHeight": "40px",
+                                    "letterSpacing": "-0.01em",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "body-lg": [
+                            "16px",
+                            {
+                                    "lineHeight": "24px",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "headline-md": [
+                            "24px",
+                            {
+                                    "lineHeight": "32px",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "headline-lg-mobile": [
+                            "28px",
+                            {
+                                    "lineHeight": "34px",
+                                    "fontWeight": "600"
+                            }
+                    ],
+                    "body-md": [
+                            "14px",
+                            {
+                                    "lineHeight": "20px",
+                                    "fontWeight": "400"
+                            }
+                    ],
+                    "display-lg": [
+                            "40px",
+                            {
+                                    "lineHeight": "48px",
+                                    "letterSpacing": "-0.02em",
+                                    "fontWeight": "700"
+                            }
+                    ],
+                    "title-lg": [
+                            "20px",
+                            {
+                                    "lineHeight": "28px",
+                                    "fontWeight": "500"
+                            }
+                    ],
+                    "label-md": [
+                            "12px",
+                            {
+                                    "lineHeight": "16px",
+                                    "letterSpacing": "0.02em",
+                                    "fontWeight": "500"
+                            }
+                    ]
+            }
+    },
+        },
+      }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .filled-icon {
+            font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .glass-panel {
+            background: rgba(22, 27, 34, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid #30363D;
+        }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-surface-container-lowest text-on-surface font-body-md min-h-screen flex flex-col antialiased selection:bg-primary-container selection:text-on-primary-container">
+<!-- Top App Bar (Modified for Modal/Paywall context - close button instead of nav) -->
+<header class="flex justify-between items-center w-full px-margin h-12 bg-surface-dim border-b border-outline-variant sticky top-0 z-50">
+<div class="flex items-center gap-2">
+<span class="material-symbols-outlined text-primary">monitoring</span>
+<span class="font-headline-md text-headline-md-mobile font-bold text-primary">AlphaStream</span>
+</div>
+<button class="text-on-surface-variant hover:text-on-surface transition-colors">
+<span class="material-symbols-outlined">close</span>
+</button>
+</header>
+<main class="flex-1 flex flex-col p-margin gap-lg max-w-md mx-auto w-full pb-xl">
+<!-- Header Section -->
+<div class="text-center space-y-sm mt-md">
+<h1 class="font-headline-lg text-headline-lg-mobile text-on-surface">Unlock Premium Alpha</h1>
+<p class="font-body-md text-on-surface-variant">Elevate your trading strategy with real-time insights and unlimited alerts.</p>
+</div>
+<!-- Plan Comparison -->
+<div class="flex flex-col gap-md mt-sm relative">
+<!-- Glow effect behind active plan -->
+<div class="absolute inset-0 bg-primary/10 blur-[40px] rounded-full pointer-events-none -z-10 top-1/3"></div>
+<!-- Free Plan -->
+<div class="glass-panel rounded-xl p-md flex flex-col gap-sm">
+<div class="flex justify-between items-start">
+<div>
+<h2 class="font-title-lg text-on-surface">Basic</h2>
+<p class="font-label-md text-on-surface-variant">Essential tools</p>
+</div>
+<div class="text-right">
+<span class="font-title-lg text-on-surface">—</span>
+<span class="font-label-md text-on-surface-variant">/mo</span>
+</div>
+</div>
+<ul class="flex flex-col gap-xs mt-sm"><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Tracked Stocks</span><span class="font-label-md text-on-surface">15 Stocks (Top S&amp;P 500)</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Favorites</span><span class="font-label-md text-on-surface">3 Slots</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Alerts</span><span class="font-label-md text-on-surface-variant">No Alerts</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Reports</span><span class="font-label-md text-on-surface">3 Reports / day</span></li></ul>
+<button class="w-full mt-sm py-sm rounded-lg border border-outline-variant text-on-surface font-label-md hover:bg-surface-variant/50 transition-colors">Current Plan</button>
+</div>
+<!-- Pro Plan (Highlighted) -->
+<div class="glass-panel rounded-xl p-md flex flex-col gap-sm border-primary relative overflow-hidden">
+<!-- Highlight badge -->
+<div class="absolute top-0 right-0 bg-primary text-on-primary font-label-md px-sm py-xs rounded-bl-lg font-bold">Popular</div>
+<div class="flex justify-between items-start">
+<div>
+<h2 class="font-title-lg text-primary">Pro</h2>
+<p class="font-label-md text-on-surface-variant">Advanced analytics</p>
+</div>
+<div class="text-right">
+<span class="font-title-lg text-on-surface">—</span>
+<span class="font-label-md text-on-surface-variant">/mo</span>
+</div>
+</div>
+<ul class="flex flex-col gap-xs mt-sm"><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface">Tracked Stocks</span><span class="font-label-md text-primary">Expanded Universe</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface">Favorites</span><span class="font-label-md text-primary">20-30 Slots</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface">Alerts</span><span class="font-label-md text-primary">Price % Alerts</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface">Weekly Recs</span><span class="font-label-md text-primary">1 Recommendation</span></li></ul>
+<button class="w-full mt-sm py-sm rounded-lg bg-primary-container text-on-primary-container font-label-md font-bold hover:opacity-90 transition-opacity shadow-[0_4px_14px_0_rgba(0,200,5,0.39)]">Upgrade to Pro</button>
+</div>
+<!-- Suite Plan -->
+<div class="glass-panel rounded-xl p-md flex flex-col gap-sm">
+<div class="flex justify-between items-start">
+<div>
+<h2 class="font-title-lg text-tertiary">Suite</h2>
+<p class="font-label-md text-on-surface-variant">The full AlphaStream power</p>
+</div>
+<div class="text-right">
+<span class="font-title-lg text-on-surface">—</span>
+<span class="font-label-md text-on-surface-variant">/mo</span>
+</div>
+</div>
+<ul class="flex flex-col gap-xs mt-sm"><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Full Stock Universe</span><span class="material-symbols-outlined text-tertiary text-[18px]">check</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Unlimited Favorites</span><span class="material-symbols-outlined text-tertiary text-[18px]">check</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">Technical &amp; Wyckoff Alerts</span><span class="material-symbols-outlined text-tertiary text-[18px]">check</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">3 Weekly Recommendations</span><span class="material-symbols-outlined text-tertiary text-[18px]">check</span></li><li class="flex items-center justify-between py-xs border-b border-surface-variant/50 last:border-0"><span class="font-body-md text-on-surface-variant">On-demand Report Refresh</span><span class="material-symbols-outlined text-tertiary text-[18px]">check</span></li></ul>
+<button class="w-full mt-sm py-sm rounded-lg bg-primary-container text-on-primary-container font-label-md font-bold hover:opacity-90 transition-opacity shadow-[0_4px_14px_0_rgba(0,200,5,0.39)]">Upgrade to Suite</button>
+</div>
+</div>
+<p class="font-label-md text-on-surface-variant text-center opacity-70 mt-md">Cancel anytime. Terms and conditions apply.</p>
+</main>
+</body></html>

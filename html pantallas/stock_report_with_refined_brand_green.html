@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Stock Report - AAPL</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "on-surface": "#e1e2e7",
+                        "surface-dim": "#111417",
+                        "surface-container": "#1d2023",
+                        "surface-variant": "#323538",
+                        "surface-container-high": "#272a2e",
+                        "surface-container-lowest": "#0b0e11",
+                        "tertiary": "#afc8ff",
+                        "on-secondary": "#690003",
+                        "outline": "#86957e",
+                        "on-tertiary": "#002e69",
+                        "primary": "#3de530",
+                        "on-primary": "#003a00",
+                        "on-secondary-container": "#ffd2cc",
+                        "error-container": "#93000a",
+                        "tertiary-fixed-dim": "#adc6ff",
+                        "on-tertiary-fixed": "#001a41",
+                        "primary-container": "#00c805",
+                        "background": "#111417",
+                        "secondary": "#ffb4aa",
+                        "primary-fixed": "#77ff62",
+                        "surface-bright": "#37393d",
+                        "on-background": "#e1e2e7",
+                        "on-error-container": "#ffdad6",
+                        "outline-variant": "#3d4b37",
+                        "on-secondary-fixed-variant": "#930005",
+                        "error": "#ffb4ab",
+                        "secondary-fixed": "#ffdad5",
+                        "on-primary-fixed": "#002200",
+                        "on-tertiary-fixed-variant": "#004493",
+                        "on-surface-variant": "#bbcbb2",
+                        "inverse-on-surface": "#2e3134",
+                        "inverse-surface": "#e1e2e7",
+                        "tertiary-container": "#82acff",
+                        "primary-fixed-dim": "#3ce42f",
+                        "surface-container-low": "#191c1f",
+                        "secondary-fixed-dim": "#ffb4aa",
+                        "on-primary-container": "#004c00",
+                        "on-primary-fixed-variant": "#005300",
+                        "surface": "#111417",
+                        "on-tertiary-container": "#003e87",
+                        "inverse-primary": "#006e01",
+                        "surface-tint": "#3ce42f",
+                        "on-error": "#690005",
+                        "tertiary-fixed": "#d8e2ff",
+                        "on-secondary-fixed": "#410001",
+                        "surface-container-highest": "#323538",
+                        "secondary-container": "#c5020b"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    "spacing": {
+                        "gutter": "16px",
+                        "xs": "4px",
+                        "xl": "32px",
+                        "md": "16px",
+                        "base": "4px",
+                        "margin": "20px",
+                        "sm": "8px",
+                        "lg": "24px"
+                    },
+                    "fontFamily": {
+                        "headline-lg": ["Inter"],
+                        "body-lg": ["Inter"],
+                        "headline-md": ["Inter"],
+                        "headline-lg-mobile": ["Inter"],
+                        "body-md": ["Inter"],
+                        "display-lg": ["Inter"],
+                        "title-lg": ["Inter"],
+                        "label-md": ["JetBrains Mono"]
+                    },
+                    "fontSize": {
+                        "headline-lg": ["32px", { "lineHeight": "40px", "letterSpacing": "-0.01em", "fontWeight": "600" }],
+                        "body-lg": ["16px", { "lineHeight": "24px", "fontWeight": "400" }],
+                        "headline-md": ["24px", { "lineHeight": "32px", "fontWeight": "600" }],
+                        "headline-lg-mobile": ["28px", { "lineHeight": "34px", "fontWeight": "600" }],
+                        "body-md": ["14px", { "lineHeight": "20px", "fontWeight": "400" }],
+                        "display-lg": ["40px", { "lineHeight": "48px", "letterSpacing": "-0.02em", "fontWeight": "700" }],
+                        "title-lg": ["20px", { "lineHeight": "28px", "fontWeight": "500" }],
+                        "label-md": ["12px", { "lineHeight": "16px", "letterSpacing": "0.02em", "fontWeight": "500" }]
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        body { background-color: #0B0E11; color: #e1e2e7; }
+        .glass-card { background: rgba(22, 27, 34, 0.7); backdrop-filter: blur(12px); border: 1px solid #30363D; }
+        .score-circle { stroke-dasharray: 251.2; stroke-dashoffset: calc(251.2 - (251.2 * var(--score)) / 100); transition: stroke-dashoffset 1s ease-out; }
+    </style>
+<style>
+    body {
+      min-height: max(884px, 100dvh);
+    }
+  </style>
+</head>
+<body class="bg-surface-container-lowest text-on-surface font-body-md min-h-screen pb-24 selection:bg-primary-container selection:text-on-primary">
+<!-- Header Section -->
+<header class="px-margin pt-lg pb-md border-b border-surface-variant sticky top-0 bg-surface-container-lowest/90 backdrop-blur-md z-40">
+<div class="flex justify-between items-start mb-sm"><button class="mr-sm text-on-surface active:scale-90 transition-all"><span class="material-symbols-outlined">chevron_left</span></button>
+<div>
+<h1 class="font-headline-lg-mobile text-headline-lg-mobile text-on-surface flex items-center gap-xs">AAPL</h1><button class="ml-xs text-on-surface-variant hover:text-primary transition-all"><span class="material-symbols-outlined text-[20px]">star</span></button>
+<p class="font-body-md text-body-md text-on-surface-variant">Apple Inc.</p>
+</div>
+<div class="text-right"><div class="font-headline-md text-headline-md text-on-surface">$175.40<span class="inline-block bg-primary text-on-primary font-label-md text-[10px] px-1.5 py-0.5 rounded-full ml-xs align-middle animate-pulse" style="background-color: #00a804;">LIVE</span></div>
+<div class="font-label-md text-label-md text-primary flex items-center justify-end gap-xs">
+<span class="material-symbols-outlined text-[16px]" data-icon="trending_up">trending_up</span>
+                    +1.2%
+                </div>
+<div class="flex items-center justify-end gap-sm mt-xs">
+<div class="font-label-md text-label-md text-on-surface-variant">Analysis updated 4h ago</div>
+<button class="flex items-center justify-center gap-xs bg-surface-container-high border border-outline-variant rounded-full py-0.5 px-2 text-on-surface active:scale-95 transition-all"><span class="material-symbols-outlined text-[14px]">lock</span><span class="bg-primary-container text-surface-container-lowest text-[8px] font-bold px-1.5 rounded-full tracking-wider" style="background-color: #00a804;">SUITE</span><span class="text-[10px] font-label-md">Update now</span></button>
+</div></div>
+</div>
+</header>
+<!-- Main Content Canvas -->
+<main class="p-margin flex flex-col gap-gutter">
+<!-- Technical Analysis Card -->
+<section class="glass-card rounded-xl p-md flex flex-col gap-md">
+<h2 class="font-title-lg text-title-lg text-on-surface border-b border-surface-variant pb-xs">Technical Analysis</h2>
+<div class="flex items-center gap-gutter">
+<div class="relative w-16 h-16 flex-shrink-0 flex items-center justify-center">
+<svg class="w-full h-full transform -rotate-90" viewbox="0 0 100 100">
+<circle cx="50" cy="50" fill="transparent" r="40" stroke="#323538" stroke-width="8"></circle>
+<circle class="score-circle" cx="50" cy="50" fill="transparent" r="40" stroke="#3de530" stroke-linecap="round" stroke-width="8" style="--score: 82;"></circle>
+</svg>
+<span class="absolute font-headline-md text-headline-md text-on-surface">82</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">
+                    Bullish momentum indicators suggest continued upward pressure. Moving averages are aligned in a positive trajectory, signaling strong near-term support levels.
+                </p>
+</div>
+</section>
+<!-- Fundamental Analysis Card -->
+<section class="glass-card rounded-xl p-md flex flex-col gap-md">
+<h2 class="font-title-lg text-title-lg text-on-surface border-b border-surface-variant pb-xs">Fundamental Analysis</h2>
+<div class="flex items-center gap-gutter">
+<div class="relative w-16 h-16 flex-shrink-0 flex items-center justify-center">
+<svg class="w-full h-full transform -rotate-90" viewbox="0 0 100 100">
+<circle cx="50" cy="50" fill="transparent" r="40" stroke="#323538" stroke-width="8"></circle>
+<circle class="score-circle" cx="50" cy="50" fill="transparent" r="40" stroke="#3de530" stroke-linecap="round" stroke-width="8" style="--score: 95;"></circle>
+</svg>
+<span class="absolute font-headline-md text-headline-md text-on-surface">95</span>
+</div>
+<p class="font-body-md text-body-md text-on-surface-variant">
+                    Robust quarterly earnings driven by exceptional services revenue. Solid cash flow generation provides substantial flexibility for capital return programs and strategic R&amp;D investments.
+                </p>
+</div>
+</section>
+<!-- Disclaimer -->
+<p class="font-label-md text-label-md text-center mt-lg mb-xl text-on-surface">For informational purposes only, not investment advice.</p>
+</main>
+<!-- BottomNavBar (Shared Component) -->
+<nav class="md:hidden bg-surface-container-lowest dark:bg-surface-container-lowest fixed bottom-0 w-full z-50 border-t border-outline-variant dark:border-outline-variant shadow-lg fixed bottom-0 left-0 w-full z-50 flex justify-around items-center px-4 py-2">
+<a class="flex flex-col items-center justify-center text-primary bg-primary-container/10 rounded-xl px-3 py-1 hover:text-primary transition-all active:scale-90 duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="home" style="font-variation-settings: 'FILL' 1;">home</span>
+<span class="font-label-md text-label-md mt-xs">Home</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="star">star</span>
+<span class="font-label-md text-label-md mt-xs">Favorites</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+<span class="font-label-md text-label-md mt-xs">Alerts</span>
+</a>
+<a class="flex flex-col items-center justify-center text-on-surface-variant px-3 py-1 hover:text-primary transition-all" href="#">
+<span class="material-symbols-outlined" data-icon="person">person</span>
+<span class="font-label-md text-label-md mt-xs">Profile</span>
+</a>
+</nav>
+<script>
+        // Trigger animations on load
+        window.addEventListener('load', () => {
+            const circles = document.querySelectorAll('.score-circle');
+            circles.forEach(circle => {
+                const score = circle.getAttribute('style').match(/--score:\s*(\d+)/)[1];
+                circle.style.strokeDashoffset = `calc(251.2 - (251.2 * ${score}) / 100)`;
+            });
+        });
+    </script>
+</body></html>
