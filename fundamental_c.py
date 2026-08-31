@@ -1,10 +1,9 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2.2
+CAN SLIM+ — Módulo C: Current Earnings v2.3
 
-Obtiene y analiza crecimiento trimestral de EPS y ventas para la parte C de
-CAN SLIM. Usa yfinance como fuente principal y el endpoint público de Yahoo
-Finance Fundamentals Time Series para ampliar el histórico trimestral cuando
-Yahoo limita quarterly_income_stmt a pocas observaciones.
+Analiza crecimiento trimestral de EPS y ventas para la parte C de CAN SLIM.
+Usa yfinance como fuente principal y Yahoo Fundamentals Time Series como
+fuente complementaria para ampliar el histórico trimestral.
 
 Esta versión NO asigna todavía un score CAN SLIM definitivo.
 
@@ -91,63 +90,89 @@ def _fetch_yahoo_timeseries(
     ticker: str,
     series_types: list[str],
     years: int = 5,
-) -> dict[str, pd.Series]:
+) -> tuple[dict[str, pd.Series], Optional[str]]:
     """
     Descarga series trimestrales del endpoint Fundamentals Time Series de Yahoo.
 
-    Se utiliza como complemento de yfinance porque quarterly_income_stmt puede
-    devolver únicamente unas pocas observaciones recientes.
+    Se hacen peticiones separadas por serie y se utiliza query2, que es el host
+    utilizado habitualmente por Yahoo para este endpoint. Separar las series
+    evita que una respuesta parcial o una limitación de la API deje sin datos
+    al resto.
     """
     now = int(time.time())
     period1 = now - years * 366 * 24 * 60 * 60
     period2 = now + 24 * 60 * 60
 
-    url = (
-        "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/"
-        f"finance/timeseries/{ticker}"
-    )
-    params = {
-        "type": ",".join(series_types),
-        "period1": period1,
-        "period2": period2,
-    }
-    headers = {"User-Agent": "Mozilla/5.0"}
-
-    try:
-        response = requests.get(url, params=params, headers=headers, timeout=15)
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError):
-        return {}
-
     result: dict[str, pd.Series] = {}
-    results = payload.get("timeseries", {}).get("result", [])
+    errors: list[str] = []
 
-    for item in results:
-        key = item.get("meta", {}).get("type", [None])[0]
-        if not key:
-            # Algunas respuestas no incluyen meta.type; recuperamos el nombre
-            # a partir de la única clave que contiene valores.
-            candidates = [
-                name for name in series_types
-                if name in item
-            ]
-            key = candidates[0] if candidates else None
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/139.0 Safari/537.36"
+        ),
+        "Accept": "application/json,text/plain,*/*",
+    }
 
-        if not key:
+    for series_type in series_types:
+        url = (
+            "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/"
+            f"finance/timeseries/{ticker}"
+        )
+        params = {
+            "symbol": ticker,
+            "type": series_type,
+            "period1": period1,
+            "period2": period2,
+            "padTimeSeries": "true",
+            "lang": "en-US",
+            "region": "US",
+        }
+
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                timeout=15,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            errors.append(f"{series_type}: {exc}")
+            continue
+
+        results = payload.get("timeseries", {}).get("result", [])
+        if not results:
+            errors.append(f"{series_type}: Yahoo no devolvió resultados")
             continue
 
         rows = []
-        for value in item.get(key, []):
-            date = value.get("asOfDate")
-            number = _clean_number(value.get("reportedValue", {}).get("raw"))
-            if date is not None and number is not None:
-                rows.append((pd.Timestamp(date), number))
+        for item in results:
+            # Normalmente el nombre de la serie es la propia clave.
+            values = item.get(series_type, [])
+            for value in values:
+                date = value.get("asOfDate")
+                raw = value.get("reportedValue", {}).get("raw")
+                number = _clean_number(raw)
+                if date is not None and number is not None:
+                    try:
+                        timestamp = pd.Timestamp(date).tz_localize(None)
+                    except (TypeError, ValueError):
+                        timestamp = pd.Timestamp(date)
+                    rows.append((timestamp, number))
 
         if rows:
-            result[key] = pd.Series(dict(sorted(rows)), dtype="float64")
+            result[series_type] = pd.Series(
+                dict(sorted(rows)),
+                dtype="float64",
+            )
+        else:
+            errors.append(f"{series_type}: resultado sin valores utilizables")
 
-    return result
+    error_text = "; ".join(errors) if errors else None
+    return result, error_text
 
 
 def _growth_yoy(series: pd.Series) -> pd.Series:
@@ -173,6 +198,11 @@ def _growth_yoy(series: pd.Series) -> pd.Series:
     return result
 
 
+def _latest_valid(series: pd.Series) -> Optional[float]:
+    valid = series.dropna()
+    return None if valid.empty else float(valid.iloc[-1])
+
+
 def _consecutive_previous(growth: pd.Series) -> Optional[float]:
     """Devuelve el YoY anterior sólo si corresponde al trimestre anterior."""
     valid = growth.dropna()
@@ -196,11 +226,6 @@ def _growth_acceleration(growth: pd.Series) -> Optional[float]:
     if previous is None or latest is None:
         return None
     return latest - previous
-
-
-def _latest_valid(series: pd.Series) -> Optional[float]:
-    valid = series.dropna()
-    return None if valid.empty else float(valid.iloc[-1])
 
 
 def _last_values(series: pd.Series, n: int = 12) -> list[dict]:
@@ -274,7 +299,6 @@ def analyze_current_earnings(ticker: str) -> dict:
     symbol = ticker.upper().strip()
     stock = yf.Ticker(symbol)
 
-    # Primero intentamos obtener el estado trimestral mediante yfinance.
     try:
         income = stock.quarterly_income_stmt
     except Exception as exc:
@@ -284,24 +308,43 @@ def analyze_current_earnings(ticker: str) -> dict:
         income_error = None
 
     eps = _series_to_quarters(
-        _extract_row(income, ["Diluted EPS", "Basic EPS", "DilutedEPS", "BasicEPS"])
+        _extract_row(
+            income,
+            ["Diluted EPS", "Basic EPS", "DilutedEPS", "BasicEPS"],
+        )
     )
     revenue = _series_to_quarters(
         _extract_row(income, ["Total Revenue", "Operating Revenue"])
     )
     net_income = _series_to_quarters(
-        _extract_row(income, ["Net Income", "Net Income Common Stockholders"])
+        _extract_row(
+            income,
+            ["Net Income", "Net Income Common Stockholders"],
+        )
     )
 
-    # Complementamos con Fundamentals Time Series para ampliar el histórico.
-    timeseries = _fetch_yahoo_timeseries(
+    timeseries, timeseries_error = _fetch_yahoo_timeseries(
         symbol,
-        ["quarterlyDilutedEPS", "quarterlyTotalRevenue", "quarterlyNetIncome"],
+        [
+            "quarterlyDilutedEPS",
+            "quarterlyTotalRevenue",
+            "quarterlyNetIncome",
+        ],
         years=5,
     )
-    eps = _merge_series(eps, timeseries.get("quarterlyDilutedEPS", pd.Series(dtype="float64")))
-    revenue = _merge_series(revenue, timeseries.get("quarterlyTotalRevenue", pd.Series(dtype="float64")))
-    net_income = _merge_series(net_income, timeseries.get("quarterlyNetIncome", pd.Series(dtype="float64")))
+
+    eps = _merge_series(
+        eps,
+        timeseries.get("quarterlyDilutedEPS", pd.Series(dtype="float64")),
+    )
+    revenue = _merge_series(
+        revenue,
+        timeseries.get("quarterlyTotalRevenue", pd.Series(dtype="float64")),
+    )
+    net_income = _merge_series(
+        net_income,
+        timeseries.get("quarterlyNetIncome", pd.Series(dtype="float64")),
+    )
 
     eps_growth = _growth_yoy(eps)
     revenue_growth = _growth_yoy(revenue)
@@ -330,7 +373,7 @@ def analyze_current_earnings(ticker: str) -> dict:
     for record in surprises:
         value = _clean_number(record.get("surprisePercent"))
         if value is not None:
-            # Yahoo expresa surprisePercent como decimal (0.06 = 6%).
+            # Yahoo expresa surprisePercent como decimal: 0.0616 = 6.16%.
             surprise_values.append(value * 100.0)
 
     latest_surprise = surprise_values[-1] if surprise_values else None
@@ -360,10 +403,10 @@ def analyze_current_earnings(ticker: str) -> dict:
         revisions = _extract_estimate_table(
             stock.eps_revisions,
             {
-                "up_7d": ["Up Last 7 Days", "0q"],
-                "up_30d": ["Up Last 30 Days", "+1q"],
-                "down_7d": ["Down Last 7 Days", "0y"],
-                "down_30d": ["Down Last 30 Days", "+1y"],
+                "up_7d": ["Up Last 7 Days"],
+                "up_30d": ["Up Last 30 Days"],
+                "down_7d": ["Down Last 7 Days"],
+                "down_30d": ["Down Last 30 Days"],
             },
         )
     except Exception:
@@ -382,9 +425,6 @@ def analyze_current_earnings(ticker: str) -> dict:
     except Exception:
         pass
 
-    # -----------------------------------------------------------------------
-    # Diagnóstico de datos
-    # -----------------------------------------------------------------------
     eps_yoy_count = int(eps_growth.dropna().shape[0])
     revenue_yoy_count = int(revenue_growth.dropna().shape[0])
 
@@ -406,6 +446,7 @@ def analyze_current_earnings(ticker: str) -> dict:
         "ticker": symbol,
         "data_source": "Yahoo Finance / yfinance + Fundamentals Time Series",
         "error": income_error,
+        "timeseries_error": timeseries_error,
         "eps_quarters": _last_values(eps),
         "revenue_quarters": _last_values(revenue),
         "net_income_quarters": _last_values(net_income),
@@ -456,6 +497,8 @@ def print_report(report: dict) -> None:
 
     if report.get("error"):
         print(f"Aviso yfinance: {report['error']}")
+    if report.get("timeseries_error"):
+        print(f"Aviso histórico Yahoo: {report['timeseries_error']}")
 
     print("\n[EPS]")
     print(f"  Último EPS:             {_fmt(report['latest_eps'])}")
