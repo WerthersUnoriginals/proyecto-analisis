@@ -1,20 +1,19 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2
+CAN SLIM+ — Módulo C: Current Earnings v2.1
 
 Analiza el crecimiento reciente de EPS e ingresos usando Yahoo Finance /
-yfinance. Esta versión separa explícitamente:
+yfinance. Esta versión separa:
 
     1) EPS trimestral y crecimiento YoY.
     2) Ventas trimestrales y crecimiento YoY.
-    3) Aceleración/desaceleración.
-    4) Cambio de pérdidas a beneficios (sin porcentajes engañosos).
+    3) Aceleración/desaceleración cuando existen trimestres consecutivos.
+    4) Cambio de pérdidas a beneficios.
     5) Sorpresas de EPS frente al consenso.
     6) Estimaciones y revisiones de EPS cuando Yahoo las proporciona.
     7) Diagnóstico de calidad/completitud de los datos.
 
-NO asigna todavía una puntuación CAN SLIM definitiva. Primero queremos
-validar la calidad de los datos y observar el comportamiento en distintas
-empresas.
+NO asigna todavía una puntuación CAN SLIM definitiva. Primero validamos
+los datos y el comportamiento del módulo en distintas empresas.
 
 Requiere:
     pip install yfinance pandas
@@ -34,6 +33,7 @@ import yfinance as yf
 # ---------------------------------------------------------------------------
 
 def _clean_number(value) -> Optional[float]:
+    """Convierte un valor a float finito o devuelve None."""
     if value is None:
         return None
     try:
@@ -43,7 +43,10 @@ def _clean_number(value) -> Optional[float]:
         return None
 
 
-def _extract_row(df: pd.DataFrame, possible_names: list[str]) -> Optional[pd.Series]:
+def _extract_row(
+    df: pd.DataFrame,
+    possible_names: list[str],
+) -> Optional[pd.Series]:
     """Busca una fila financiera tolerando variaciones de nombres de Yahoo."""
     if df is None or df.empty:
         return None
@@ -75,11 +78,12 @@ def _series_to_quarters(row: Optional[pd.Series]) -> pd.Series:
 
 def _growth_yoy(series: pd.Series) -> pd.Series:
     """
-    Calcula crecimiento interanual por posición trimestral.
+    Calcula crecimiento interanual por trimestre.
 
-    Si el EPS/valor comparable del año anterior es <= 0, no devuelve un
-    porcentaje porque un cambio de pérdidas a beneficios no tiene un % YoY
-    convencional interpretable.
+    Se utiliza el trimestre situado cuatro observaciones atrás. Si el valor
+    comparable del año anterior es <= 0, no se fabrica un porcentaje: ese
+    caso se trata aparte como transición de pérdidas a beneficios cuando
+    corresponda.
     """
     if series.empty:
         return pd.Series(dtype="float64")
@@ -102,34 +106,55 @@ def _growth_yoy(series: pd.Series) -> pd.Series:
     return result
 
 
-def _classify_eps_change(current: Optional[float], previous_yoy: Optional[float]) -> str:
-    """Clasifica casos que un porcentaje estándar no representa bien."""
-    if current is None:
-        return "sin_datos"
-    if previous_yoy is None and current > 0:
-        return "positivo_sin_yoy_calculable"
-    return "normal"
-
-
 def _growth_acceleration(growth: pd.Series) -> Optional[float]:
-    """Diferencia en puntos porcentuales entre dos crecimientos YoY válidos."""
+    """
+    Calcula aceleración en puntos porcentuales sólo entre dos observaciones
+    YoY consecutivas del histórico original.
+    """
+    if growth.empty:
+        return None
+
     valid = growth.dropna()
     if len(valid) < 2:
         return None
+
+    # Exigimos que las dos observaciones YoY pertenezcan a trimestres
+    # consecutivos. Así evitamos comparar Q4 con Q2 si falta Q3.
+    latest_date = valid.index[-1]
+    previous_date = valid.index[-2]
+
+    days_between = (latest_date - previous_date).days
+    if days_between < 70 or days_between > 110:
+        return None
+
     return float(valid.iloc[-1] - valid.iloc[-2])
 
 
-def _latest_valid(growth: pd.Series) -> Optional[float]:
-    valid = growth.dropna()
+def _latest_valid(series: pd.Series) -> Optional[float]:
+    valid = series.dropna()
     return None if valid.empty else float(valid.iloc[-1])
 
 
-def _previous_valid(growth: pd.Series) -> Optional[float]:
-    valid = growth.dropna()
-    return float(valid.iloc[-2]) if len(valid) >= 2 else None
+def _previous_consecutive_valid(series: pd.Series) -> Optional[float]:
+    if series.empty:
+        return None
+
+    valid = series.dropna()
+    if len(valid) < 2:
+        return None
+
+    latest_date = valid.index[-1]
+    previous_date = valid.index[-2]
+    days_between = (latest_date - previous_date).days
+
+    if days_between < 70 or days_between > 110:
+        return None
+
+    return float(valid.iloc[-2])
 
 
 def _last_values(series: pd.Series, n: int = 8) -> list[dict]:
+    """Devuelve las últimas observaciones en formato JSON-friendly."""
     output = []
     for date, value in series.tail(n).items():
         output.append({
@@ -140,7 +165,7 @@ def _last_values(series: pd.Series, n: int = 8) -> list[dict]:
 
 
 def _history_records(history: pd.DataFrame, n: int = 8) -> list[dict]:
-    """Normaliza earnings_history para que no falle con tipos Timestamp."""
+    """Normaliza earnings_history para impresión y posterior procesamiento."""
     if history is None or history.empty:
         return []
 
@@ -155,17 +180,18 @@ def _history_records(history: pd.DataFrame, n: int = 8) -> list[dict]:
             elif pd.isna(value):
                 record[column] = None
             else:
-                try:
-                    record[column] = float(value) if isinstance(value, (int, float)) else value
-                except (TypeError, ValueError):
-                    record[column] = value
+                number = _clean_number(value)
+                record[column] = number if number is not None else value
         records.append(record)
 
     return records
 
 
-def _extract_estimate_table(table: pd.DataFrame, preferred_rows: list[str]) -> dict:
-    """Extrae de forma tolerante las filas relevantes de una tabla de estimates."""
+def _extract_estimate_table(
+    table: pd.DataFrame,
+    preferred_rows: list[str],
+) -> dict:
+    """Extrae filas relevantes de una tabla de estimaciones de Yahoo."""
     if table is None or table.empty:
         return {}
 
@@ -173,9 +199,10 @@ def _extract_estimate_table(table: pd.DataFrame, preferred_rows: list[str]) -> d
     normalized = {str(index).strip().lower(): index for index in table.index}
 
     for wanted in preferred_rows:
-        key = wanted.lower()
+        key = wanted.strip().lower()
         if key not in normalized:
             continue
+
         row = table.loc[normalized[key]]
         clean = {}
         for column, value in row.items():
@@ -191,6 +218,7 @@ def _extract_estimate_table(table: pd.DataFrame, preferred_rows: list[str]) -> d
 # ---------------------------------------------------------------------------
 
 def analyze_current_earnings(ticker: str) -> dict:
+    """Analiza la C de CAN SLIM+ para un ticker."""
     symbol = ticker.upper().strip()
     stock = yf.Ticker(symbol)
 
@@ -203,7 +231,6 @@ def analyze_current_earnings(ticker: str) -> dict:
             "error": f"No se pudo obtener quarterly_income_stmt: {exc}",
         }
 
-    # Yahoo cambia ocasionalmente los nombres de las filas según emisor.
     eps_row = _extract_row(
         income,
         ["Diluted EPS", "Basic EPS", "DilutedEPS", "BasicEPS"],
@@ -227,22 +254,13 @@ def analyze_current_earnings(ticker: str) -> dict:
     latest_eps = float(eps.iloc[-1]) if not eps.empty else None
     latest_revenue = float(revenue.iloc[-1]) if not revenue.empty else None
 
-    previous_eps_comparable = (
-        float(eps.iloc[-5]) if len(eps) >= 5 else None
-    )
-    previous_revenue_comparable = (
-        float(revenue.iloc[-5]) if len(revenue) >= 5 else None
-    )
-
-    # Detectamos explícitamente transición de pérdidas a beneficios.
+    previous_eps_comparable = float(eps.iloc[-5]) if len(eps) >= 5 else None
     eps_loss_to_profit = (
         latest_eps is not None
         and previous_eps_comparable is not None
         and previous_eps_comparable <= 0
         and latest_eps > 0
     )
-
-    revenue_loss_to_profit = False  # reservado: las ventas no son beneficio.
 
     # -----------------------------------------------------------------------
     # Earnings history / surprises
@@ -252,7 +270,7 @@ def analyze_current_earnings(ticker: str) -> dict:
         history = stock.earnings_history
         surprises = _history_records(history, n=8)
     except Exception:
-        history = pd.DataFrame()
+        pass
 
     surprise_values = []
     for record in surprises:
@@ -276,15 +294,20 @@ def analyze_current_earnings(ticker: str) -> dict:
             ["Current Qtr.", "Next Qtr.", "Current Year", "Next Year"],
         )
     except Exception:
-        estimates = {}
+        pass
 
     try:
         revisions = _extract_estimate_table(
             stock.eps_revisions,
-            ["Up Last 7 Days", "Up Last 30 Days", "Down Last 7 Days", "Down Last 30 Days"],
+            [
+                "Up Last 7 Days",
+                "Up Last 30 Days",
+                "Down Last 7 Days",
+                "Down Last 30 Days",
+            ],
         )
     except Exception:
-        revisions = {}
+        pass
 
     try:
         growth_estimates = _extract_estimate_table(
@@ -292,7 +315,7 @@ def analyze_current_earnings(ticker: str) -> dict:
             ["Current Qtr.", "Next Qtr.", "Current Year", "Next Year"],
         )
     except Exception:
-        growth_estimates = {}
+        pass
 
     # -----------------------------------------------------------------------
     # Diagnóstico de datos
@@ -307,15 +330,18 @@ def analyze_current_earnings(ticker: str) -> dict:
     else:
         data_quality = "insuficiente"
 
-    eps_change_type = _classify_eps_change(latest_eps, _latest_valid(eps_growth))
     if eps_loss_to_profit:
         eps_change_type = "perdidas_a_beneficios"
+    elif latest_eps is None:
+        eps_change_type = "sin_datos"
+    else:
+        eps_change_type = "normal"
 
-    result = {
+    return {
         "ticker": symbol,
         "data_source": "Yahoo Finance / yfinance",
 
-        # Datos brutos útiles para auditoría.
+        # Datos brutos.
         "eps_quarters": _last_values(eps),
         "revenue_quarters": _last_values(revenue),
         "net_income_quarters": _last_values(net_income),
@@ -327,11 +353,11 @@ def analyze_current_earnings(ticker: str) -> dict:
         # Métricas actuales.
         "latest_eps": latest_eps,
         "latest_eps_yoy_pct": _latest_valid(eps_growth),
-        "previous_eps_yoy_pct": _previous_valid(eps_growth),
+        "previous_eps_yoy_pct": _previous_consecutive_valid(eps_growth),
         "eps_acceleration_pp": _growth_acceleration(eps_growth),
         "latest_revenue": latest_revenue,
         "latest_revenue_yoy_pct": _latest_valid(revenue_growth),
-        "previous_revenue_yoy_pct": _previous_valid(revenue_growth),
+        "previous_revenue_yoy_pct": _previous_consecutive_valid(revenue_growth),
         "revenue_acceleration_pp": _growth_acceleration(revenue_growth),
 
         # Casos especiales.
@@ -350,7 +376,7 @@ def analyze_current_earnings(ticker: str) -> dict:
         "eps_revisions": revisions,
         "growth_estimates": growth_estimates,
 
-        # Calidad.
+        # Calidad de datos.
         "quarters_eps_available": len(eps),
         "quarters_revenue_available": len(revenue),
         "eps_yoy_calculable": eps_yoy_count,
@@ -358,20 +384,20 @@ def analyze_current_earnings(ticker: str) -> dict:
         "data_quality": data_quality,
     }
 
-    return result
-
 
 # ---------------------------------------------------------------------------
 # Informe de consola
 # ---------------------------------------------------------------------------
 
 def _fmt(value, suffix="") -> str:
+    """Formatea una métrica numérica para la consola."""
     if value is None:
         return "N/D"
     return f"{value:.2f}{suffix}"
 
 
 def print_report(report: dict) -> None:
+    """Imprime el informe C de un ticker."""
     print(f"\n{'=' * 64}")
     print(f"CAN SLIM+ | C — {report['ticker']}")
     print(f"{'=' * 64}")
@@ -396,7 +422,10 @@ def print_report(report: dict) -> None:
 
     print("\n[SORPRESA EPS]")
     print(f"  Última sorpresa:        {_fmt(report['latest_eps_surprise_pct'], '%')}")
-    print(f"  Sorpresas positivas:    {report['positive_surprises_count']}/{report['surprises_available']}")
+    print(
+        f"  Sorpresas positivas:    "
+        f"{report['positive_surprises_count']}/{report['surprises_available']}"
+    )
 
     print("\n[DATOS]")
     print(f"  Trimestres EPS:         {report['quarters_eps_available']}")
@@ -425,7 +454,7 @@ def print_report(report: dict) -> None:
 
 
 if __name__ == "__main__":
-    # Cambiar esta lista para probar otras acciones.
+    # Lista de prueba. Cambiar o ampliar según las pruebas que queramos hacer.
     TEST_TICKERS = ["NVDA", "MSFT", "COST", "XOM", "AMZN"]
 
     for ticker in TEST_TICKERS:
