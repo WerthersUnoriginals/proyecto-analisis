@@ -1,5 +1,5 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2.5.3
+CAN SLIM+ — Módulo C: Current Earnings v2.6 experimental
 
 Mejoras v2.5.3:
 - SEC Company Facts como histórico principal y Yahoo/yfinance como complemento.
@@ -13,7 +13,7 @@ Mejoras v2.5.3:
 - Control explícito de discrepancias SEC↔Yahoo por métrica.
 - Estado agregado DATA_INTEGRITY para desacoplar calidad del dato y score CAN SLIM.
 
-No aplica todavía un score CAN SLIM definitivo.
+Integra C_CLASSIC y C Score v1 experimental; no es todavía un score definitivo.
 
 Requiere:
     pip install yfinance pandas requests
@@ -29,6 +29,8 @@ from typing import Optional
 import pandas as pd
 import requests
 import yfinance as yf
+
+from c_score_v1 import build_c_score
 
 
 CIK_CACHE = {
@@ -786,9 +788,9 @@ def analyze_current_earnings(ticker: str) -> dict:
     data_integrity = _aggregate_data_integrity(data_quality, consistency, split_integrity_status, shares_quality)
     eps_change_type = "perdidas_a_beneficios" if eps_loss_to_profit else ("sin_datos" if latest_eps is None else "normal")
 
-    return {
+    report = {
         "ticker": symbol,
-        "version": "2.5.3",
+        "version": "2.6-exp",
         "data_source": "SEC Company Facts + Yahoo Finance/yfinance",
         "cik": cik,
         "cik_source": cik_source,
@@ -839,6 +841,8 @@ def analyze_current_earnings(ticker: str) -> dict:
         "data_quality": data_quality,
         "data_integrity": data_integrity,
     }
+    report.update(build_c_score(report))
+    return report
 
 
 def _fmt(value, suffix="") -> str:
@@ -850,6 +854,28 @@ def print_report(report: dict) -> None:
     print(f"CAN SLIM+ v{report['version']} | C — {report['ticker']}")
     print(f"{'=' * 78}")
     print(f"CIK: {report['cik'] or 'N/D'} | resolver: {report['cik_source']}")
+    score = report.get("c_score_v1", {})
+    classic = report.get("c_classic", {})
+    if score:
+        print("\n[C SCORE V1 — EXPERIMENTAL]")
+        print(f"  C+ Score:               {_fmt(score.get('normalized_score'), '/100')}")
+        print(f"  Clase:                  {score.get('class', 'N/D')}")
+        print(f"  Estado score:           {score.get('status', 'N/D')}")
+        print(f"  Puntos disponibles:     {_fmt(score.get('available_points'), '/100')}")
+        for name, item in score.get("components", {}).items():
+            if item.get("available"):
+                print(f"  {name:22s} {_fmt(item.get('points'))}/{item.get('max', 0):.0f}")
+            else:
+                print(f"  {name:22s} N/D/{item.get('max', 0):.0f} ({item.get('status', 'N/D')})")
+        print(f"  Flags:                  {report.get('c_flags', [])}")
+        print(f"  Diagnóstico:            {score.get('diagnostic', [])}")
+    if classic:
+        print("\n[C CLASSIC]")
+        print(f"  Resultado:              {classic.get('result')}")
+        print(f"  EPS YoY >=25%:          {classic.get('eps_yoy_ge_25')}")
+        print(f"  Ventas fuertes:         {classic.get('sales_growth_strong')}")
+        print(f"  EPS acelerando:         {classic.get('eps_accelerating')}")
+        print(f"  Ventas acelerando:      {classic.get('sales_accelerating')}")
     if report.get("error"):
         print(f"Aviso yfinance: {report['error']}")
     if report.get("timeseries_error"):
