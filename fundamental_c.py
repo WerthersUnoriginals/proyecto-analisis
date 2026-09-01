@@ -1,17 +1,17 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2.5.2
+CAN SLIM+ — Módulo C: Current Earnings v2.5.3
 
-Mejoras v2.5.2:
+Mejoras v2.5.3:
 - SEC Company Facts como histórico principal y Yahoo/yfinance como complemento.
 - YoY por trimestre comparable real, no por posición i-4.
-- Resolver ticker→CIK con caché, yfinance/filings, catálogo SEC y mapping
-  pre-generado desde datos SEC como fallback externo.
+- Resolver ticker→CIK con caché local y mapping externo cargado una sola vez.
 - Detección de splits con yfinance.
-- Verificación de EPS SEC mediante Net Income / Diluted Shares para comprobar si
-  los datos históricos ya están ajustados por splits antes de tocar nada.
-- Discovery conservador de conceptos XBRL de diluted shares cuando los tags
-  estándar no aparecen.
+- Verificación de EPS SEC mediante Net Income / weighted-average shares.
+- Clasificación explícita de la calidad de shares: diluted exactas, basic+diluted,
+  basic fallback o no disponibles.
+- Un fallback BASIC nunca certifica por sí solo que un split esté ajustado.
 - Control explícito de discrepancias SEC↔Yahoo por métrica.
+- Estado agregado DATA_INTEGRITY para desacoplar calidad del dato y score CAN SLIM.
 
 No aplica todavía un score CAN SLIM definitivo.
 
@@ -38,9 +38,10 @@ CIK_CACHE = {
     "XOM": "0000034088",
     "AMZN": "0001018724",
 }
+CIK_MAPPER_CACHE: Optional[dict] = None
 
 SEC_HEADERS = {
-    "User-Agent": "CANSLIMResearch/0.5 educational-research",
+    "User-Agent": "CANSLIMResearch/0.6 educational-research",
     "Accept-Encoding": "gzip, deflate",
     "Accept": "application/json",
 }
@@ -292,7 +293,10 @@ def _cik_from_sec_catalog(symbol: str) -> Optional[str]:
     return None
 
 
-def _cik_from_sec_cik_mapper(symbol: str) -> Optional[str]:
+def _load_cik_mapper() -> dict:
+    global CIK_MAPPER_CACHE
+    if CIK_MAPPER_CACHE is not None:
+        return CIK_MAPPER_CACHE
     try:
         response = requests.get(
             SEC_CIK_MAPPER_URL,
@@ -301,10 +305,14 @@ def _cik_from_sec_cik_mapper(symbol: str) -> Optional[str]:
         )
         response.raise_for_status()
         payload = response.json()
+        CIK_MAPPER_CACHE = payload if isinstance(payload, dict) else {}
     except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
+        CIK_MAPPER_CACHE = {}
+    return CIK_MAPPER_CACHE
+
+
+def _cik_from_sec_cik_mapper(symbol: str) -> Optional[str]:
+    payload = _load_cik_mapper()
     cik = payload.get(symbol.upper())
     return str(cik).zfill(10) if cik is not None else None
 
@@ -439,10 +447,25 @@ def _discover_diluted_shares_tags(facts: dict) -> list[str]:
             score += 8
         if "outstanding" in text:
             score += 3
+        if "basic" in text and "diluted" not in text:
+            score -= 4
         if "adjustment" in text:
             score -= 8
         scored.append((score, tag))
     return [tag for _, tag in sorted(scored, key=lambda x: (-x[0], x[1]))]
+
+
+def _classify_shares_tag(tag: Optional[str]) -> str:
+    if not tag:
+        return "NOT_AVAILABLE"
+    text = tag.lower()
+    if "basicanddiluted" in text or ("basic" in text and "diluted" in text):
+        return "BASIC_AND_DILUTED"
+    if "diluted" in text:
+        return "DILUTED_EXACT"
+    if "basic" in text:
+        return "BASIC_FALLBACK"
+    return "REVIEW_REQUIRED"
 
 
 def _extract_sec_metric(facts: dict, metric: str, years: int) -> tuple[pd.Series, Optional[str]]:
@@ -511,10 +534,11 @@ def _check_for_date(checks: list[dict], date: Optional[pd.Timestamp], max_days: 
     return None if not candidates else min(candidates, key=lambda x: x[0])[1]
 
 
-def _assess_split_integrity(splits, eps, net_income, diluted_shares) -> list[dict]:
+def _assess_split_integrity(splits, eps, net_income, diluted_shares, shares_quality: str) -> list[dict]:
     if splits.empty:
         return []
     checks = _implied_eps_check(eps, net_income, diluted_shares)
+    can_certify = shares_quality in {"DILUTED_EXACT", "BASIC_AND_DILUTED"}
     events = []
     for split_date, split_ratio in splits.items():
         split_date = pd.Timestamp(split_date)
@@ -535,7 +559,9 @@ def _assess_split_integrity(splits, eps, net_income, diluted_shares) -> list[dic
             dist_to_split = abs(math.log(max(observed_ratio, 1e-12) / max(float(split_ratio), 1e-12)))
         else:
             dist_to_one = dist_to_split = None
-        if both_eps_pass and observed_ratio is not None and dist_to_one < dist_to_split:
+        if not can_certify:
+            status = "REVIEW_REQUIRED"
+        elif both_eps_pass and observed_ratio is not None and dist_to_one < dist_to_split:
             status = "ALREADY_ADJUSTED"
         elif both_eps_pass and observed_ratio is not None and dist_to_split < dist_to_one:
             status = "UNADJUSTED"
@@ -545,6 +571,7 @@ def _assess_split_integrity(splits, eps, net_income, diluted_shares) -> list[dic
             "date": split_date.strftime("%Y-%m-%d"),
             "ratio": float(split_ratio),
             "status": status,
+            "shares_quality": shares_quality,
             "before_eps_date": before.strftime("%Y-%m-%d") if before is not None else None,
             "after_eps_date": after.strftime("%Y-%m-%d") if after is not None else None,
             "before_eps_diff_pct": before_check["diff_pct"] if before_check else None,
@@ -581,6 +608,26 @@ def _split_between(splits: pd.Series, prior_date, current_date) -> bool:
     if prior_date is None or current_date is None or splits.empty:
         return False
     return bool(((splits.index > pd.Timestamp(prior_date)) & (splits.index <= pd.Timestamp(current_date))).any())
+
+
+def _aggregate_data_integrity(data_quality: str, consistency: dict, split_integrity_status: str, shares_quality: str) -> str:
+    statuses = {item.get("status") for item in consistency.values()}
+    if data_quality in {"insuficiente", "revision_split"}:
+        return "REVIEW_REQUIRED"
+    if split_integrity_status in {"UNADJUSTED_DETECTED", "REVIEW_REQUIRED", "UNKNOWN"}:
+        return "REVIEW_REQUIRED"
+    if "DISCREPANCIA_ALTA" in statuses:
+        return "REVIEW_REQUIRED"
+    warnings = []
+    if "DISCREPANCIA_CONTABLE" in statuses:
+        warnings.append("ACCOUNTING_DIFFERENCE")
+    if shares_quality == "BASIC_FALLBACK":
+        warnings.append("BASIC_SHARES_FALLBACK")
+    if data_quality != "completa":
+        warnings.append("PARTIAL_CORE_DATA")
+    if warnings:
+        return "VERIFIED_WITH_" + "_AND_".join(warnings)
+    return "VERIFIED"
 
 
 def _history_records(history: pd.DataFrame, n: int = 8) -> list[dict]:
@@ -642,6 +689,7 @@ def analyze_current_earnings(ticker: str) -> dict:
     sec_revenue = sec_data.get("REVENUE", pd.Series(dtype="float64"))
     sec_net_income = sec_data.get("NET_INCOME", pd.Series(dtype="float64"))
     sec_diluted_shares = sec_data.get("DILUTED_SHARES", pd.Series(dtype="float64"))
+    shares_quality = _classify_shares_tag(sec_tags.get("DILUTED_SHARES"))
 
     eps = _merge_primary_with_fallback(sec_eps, yahoo_eps)
     revenue = _merge_primary_with_fallback(sec_revenue, yahoo_revenue)
@@ -656,7 +704,7 @@ def analyze_current_earnings(ticker: str) -> dict:
     latest_revenue = _latest_valid(revenue)
 
     splits, splits_error = _get_yfinance_splits(stock, years=6)
-    split_events = _assess_split_integrity(splits, sec_eps, sec_net_income, sec_diluted_shares)
+    split_events = _assess_split_integrity(splits, sec_eps, sec_net_income, sec_diluted_shares, shares_quality)
     split_statuses = {event["status"] for event in split_events}
     if not split_events:
         split_integrity_status = "NO_RECENT_SPLITS" if splits_error is None else "UNKNOWN"
@@ -735,11 +783,12 @@ def analyze_current_earnings(ticker: str) -> dict:
     if current_yoy_crosses_split and split_integrity_status in {"UNADJUSTED_DETECTED", "REVIEW_REQUIRED", "UNKNOWN"}:
         data_quality = "revision_split"
 
+    data_integrity = _aggregate_data_integrity(data_quality, consistency, split_integrity_status, shares_quality)
     eps_change_type = "perdidas_a_beneficios" if eps_loss_to_profit else ("sin_datos" if latest_eps is None else "normal")
 
     return {
         "ticker": symbol,
-        "version": "2.5.2",
+        "version": "2.5.3",
         "data_source": "SEC Company Facts + Yahoo Finance/yfinance",
         "cik": cik,
         "cik_source": cik_source,
@@ -779,6 +828,7 @@ def analyze_current_earnings(ticker: str) -> dict:
         "sec_eps_quarters": len(sec_eps),
         "sec_revenue_quarters": len(sec_revenue),
         "sec_diluted_shares_quarters": len(sec_diluted_shares),
+        "shares_quality": shares_quality,
         "yahoo_eps_quarters": len(yahoo_eps),
         "yahoo_revenue_quarters": len(yahoo_revenue),
         "splits": [{"date": pd.Timestamp(d).strftime("%Y-%m-%d"), "ratio": float(v)} for d, v in splits.items()],
@@ -787,6 +837,7 @@ def analyze_current_earnings(ticker: str) -> dict:
         "current_yoy_crosses_split": current_yoy_crosses_split,
         "source_consistency": consistency,
         "data_quality": data_quality,
+        "data_integrity": data_integrity,
     }
 
 
@@ -818,6 +869,7 @@ def print_report(report: dict) -> None:
     print(f"  Ventas YoY anterior:    {_fmt(report['previous_revenue_yoy_pct'], '%')}")
     print(f"  Aceleración ventas:     {_fmt(report['revenue_acceleration_pp'], ' pp')}")
     print("\n[SPLITS / INTEGRIDAD EPS]")
+    print(f"  Calidad shares:         {report['shares_quality']}")
     print(f"  Estado:                 {report['split_integrity_status']}")
     print(f"  YoY actual cruza split: {report['current_yoy_crosses_split']}")
     if report["splits"]:
@@ -825,7 +877,7 @@ def print_report(report: dict) -> None:
     for event in report["split_events"]:
         print(
             f"  {event['date']} x{event['ratio']:g} -> {event['status']} | "
-            f"shares ratio={_fmt(event['diluted_shares_observed_ratio'])} | "
+            f"shares={event['shares_quality']} | ratio={_fmt(event['diluted_shares_observed_ratio'])} | "
             f"EPS diff antes/después={_fmt(event['before_eps_diff_pct'], '%')}/{_fmt(event['after_eps_diff_pct'], '%')}"
         )
     print("\n[CONSISTENCIA SEC ↔ YAHOO]")
@@ -839,13 +891,14 @@ def print_report(report: dict) -> None:
     print(f"  Sorpresas positivas:    {report['positive_surprises_count']}/{report['surprises_available']}")
     print("\n[DATOS]")
     print(f"  SEC EPS / ventas:       {report['sec_eps_quarters']} / {report['sec_revenue_quarters']}")
-    print(f"  SEC diluted shares:     {report['sec_diluted_shares_quarters']}")
+    print(f"  SEC shares:             {report['sec_diluted_shares_quarters']} ({report['shares_quality']})")
     print(f"  Yahoo EPS / ventas:     {report['yahoo_eps_quarters']} / {report['yahoo_revenue_quarters']}")
     print(f"  Híbrido EPS / ventas:   {report['quarters_eps_available']} / {report['quarters_revenue_available']}")
     print(f"  YoY EPS calculables:    {report['eps_yoy_calculable']}")
     print(f"  YoY ventas calculables: {report['revenue_yoy_calculable']}")
     print(f"  Tags SEC:               {report['sec_tags']}")
-    print(f"  Calidad:                {report['data_quality']}")
+    print(f"  Calidad núcleo C:       {report['data_quality']}")
+    print(f"  DATA_INTEGRITY:         {report['data_integrity']}")
     print("\n[HISTÓRICO EPS YoY]")
     for item in report["eps_yoy_pct"]:
         print(f"  {item['date']}: {item['value']:+.2f}%")
