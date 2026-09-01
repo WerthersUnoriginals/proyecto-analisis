@@ -1,0 +1,60 @@
+name: Fundamental C v2.6 experimental patch-test
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fundamental-c-v26-patch-test.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch fundamental_c.py to v2.6 experimental
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('fundamental_c.py')
+          s = p.read_text()
+          s = s.replace('CAN SLIM+ — Módulo C: Current Earnings v2.5.3', 'CAN SLIM+ — Módulo C: Current Earnings v2.6 experimental', 1)
+          s = s.replace('No aplica todavía un score CAN SLIM definitivo.', 'Integra C_CLASSIC y C Score v1 experimental; no es todavía un score definitivo.', 1)
+          marker = 'import yfinance as yf\n'
+          if 'from c_score_v1 import build_c_score' not in s:
+              s = s.replace(marker, marker + '\nfrom c_score_v1 import build_c_score\n', 1)
+          old = '    return {\n        "ticker": symbol,\n        "version": "2.5.3",'
+          new = '    report = {\n        "ticker": symbol,\n        "version": "2.6-exp",'
+          if old not in s:
+              raise SystemExit('No se encontró inicio del return para parchear')
+          s = s.replace(old, new, 1)
+          old_end = '        "data_integrity": data_integrity,\n    }\n\n\ndef _fmt'
+          new_end = '        "data_integrity": data_integrity,\n    }\n    report.update(build_c_score(report))\n    return report\n\n\ndef _fmt'
+          if old_end not in s:
+              raise SystemExit('No se encontró final del return para parchear')
+          s = s.replace(old_end, new_end, 1)
+          anchor = '    print(f"CIK: {report[\'cik\'] or \'N/D\'} | resolver: {report[\'cik_source\']}")\n'
+          block = '''    score = report.get("c_score_v1", {})\n    classic = report.get("c_classic", {})\n    if score:\n        print("\\n[C SCORE V1 — EXPERIMENTAL]")\n        print(f"  C+ Score:               {_fmt(score.get('normalized_score'), '/100')}")\n        print(f"  Clase:                  {score.get('class', 'N/D')}")\n        print(f"  Estado score:           {score.get('status', 'N/D')}")\n        print(f"  Puntos disponibles:     {_fmt(score.get('available_points'), '/100')}")\n        for name, item in score.get("components", {}).items():\n            if item.get("available"):\n                print(f"  {name:22s} {_fmt(item.get('points'))}/{item.get('max', 0):.0f}")\n            else:\n                print(f"  {name:22s} N/D/{item.get('max', 0):.0f} ({item.get('status', 'N/D')})")\n        print(f"  Flags:                  {report.get('c_flags', [])}")\n        print(f"  Diagnóstico:            {score.get('diagnostic', [])}")\n    if classic:\n        print("\\n[C CLASSIC]")\n        print(f"  Resultado:              {classic.get('result')}")\n        print(f"  EPS YoY >=25%:          {classic.get('eps_yoy_ge_25')}")\n        print(f"  Ventas fuertes:         {classic.get('sales_growth_strong')}")\n        print(f"  EPS acelerando:         {classic.get('eps_accelerating')}")\n        print(f"  Ventas acelerando:      {classic.get('sales_accelerating')}")\n'''
+          if '[C SCORE V1 — EXPERIMENTAL]' not in s:
+              if anchor not in s:
+                  raise SystemExit('No se encontró ancla de print_report')
+              s = s.replace(anchor, anchor + block, 1)
+          p.write_text(s)
+          PY
+      - name: Install dependencies
+        run: pip install requests pandas yfinance
+      - name: Run fundamental C v2.6 experimental
+        run: python3 fundamental_c.py
+      - name: Commit v2.6 experimental
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fundamental_c.py
+          git commit -m "Integrar C Score v1 experimental en fundamental C v2.6"
+          git push
