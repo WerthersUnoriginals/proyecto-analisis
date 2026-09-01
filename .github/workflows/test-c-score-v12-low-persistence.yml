@@ -1,5 +1,6 @@
 name: Test C Score v1.2 low persistence cases
 
+# Workflow dirigido a los 17 casos detectados en la validación v1.1.
 on:
   push:
     paths:
