@@ -10,7 +10,6 @@ Objetivos:
 from __future__ import annotations
 
 from collections import Counter
-from io import StringIO
 import time
 
 import pandas as pd
@@ -18,7 +17,7 @@ import requests
 
 from fundamental_c import analyze_current_earnings
 
-IWB_URL = "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/1467271812596.ajax?fileType=csv&fileName=IWB_holdings&dataType=fund"
+IWB_URL = "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/1467271812596.ajax?fileType=json&tab=all"
 OUTPUT_CSV = "russell1000_c_score_v12_results.csv"
 FAILURES_CSV = "russell1000_c_score_v12_failures.csv"
 MIN_PLAUSIBLE_UNIVERSE = 900
@@ -26,37 +25,30 @@ MAX_PLAUSIBLE_UNIVERSE = 1150
 
 
 def load_tickers() -> tuple[list[str], dict]:
-    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/0.8"}
+    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/0.9"}
     response = requests.get(IWB_URL, headers=headers, timeout=60)
     response.raise_for_status()
-    lines = response.text.replace("\ufeff", "").splitlines()
-
-    # iShares suele entrecomillar la cabecera ("Ticker","Name",...) y puede
-    # anteponer varias líneas de metadatos. No dependemos de una posición fija.
-    candidates = [
-        i for i, line in enumerate(lines)
-        if "Ticker" in line and "Asset Class" in line and "," in line
-    ]
-    if not candidates:
-        preview = " | ".join(lines[:8])[:1200]
-        raise RuntimeError(f"No se encontró cabecera de holdings IWB. Preview={preview!r}")
-    start = candidates[0]
-    frame = pd.read_csv(StringIO("\n".join(lines[start:])))
-    frame.columns = [str(col).strip().strip('"') for col in frame.columns]
-
-    raw_rows = len(frame)
-    if "Asset Class" in frame.columns:
-        equity_mask = frame["Asset Class"].astype(str).str.strip().str.lower().eq("equity")
-        frame = frame[equity_mask].copy()
-    equity_rows = len(frame)
+    payload = response.json()
+    rows = payload.get("aaData", [])
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError(f"Respuesta JSON IWB sin aaData válido: keys={list(payload)[:20]}")
 
     tickers: list[str] = []
     rejected: list[str] = []
-    for value in frame.get("Ticker", pd.Series(dtype=str)).dropna():
-        ticker = str(value).strip().upper().replace(".", "-")
+    equity_rows = 0
+
+    for item in rows:
+        if not isinstance(item, list) or len(item) < 4:
+            rejected.append("MALFORMED_ROW")
+            continue
+        asset_class = str(item[3]).strip().lower()
+        if asset_class != "equity":
+            continue
+        equity_rows += 1
+        ticker = str(item[0]).strip().upper().replace(".", "-")
         valid = (
             bool(ticker)
-            and ticker not in {"-", "USD"}
+            and ticker not in {"-", "USD", "NONE", "NAN"}
             and ticker.replace("-", "").isalnum()
             and len(ticker) <= 10
         )
@@ -69,11 +61,12 @@ def load_tickers() -> tuple[list[str], dict]:
     if not MIN_PLAUSIBLE_UNIVERSE <= len(unique) <= MAX_PLAUSIBLE_UNIVERSE:
         raise RuntimeError(
             f"Universo IWB no plausible: {len(unique)} tickers; esperado entre "
-            f"{MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}"
+            f"{MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}; "
+            f"aaData={len(rows)}, equity_rows={equity_rows}, rejected={len(rejected)}"
         )
 
     meta = {
-        "raw_rows": raw_rows,
+        "raw_rows": len(rows),
         "equity_rows": equity_rows,
         "unique_tickers": len(unique),
         "rejected_rows": len(rejected),
@@ -119,7 +112,7 @@ def main() -> None:
     print("=" * 140)
     print("RUSSELL 1000 STRESS TEST — C SCORE V1.2")
     print("=" * 140)
-    print("Fuente operativa: holdings IWB (iShares Russell 1000 ETF)")
+    print("Fuente operativa: holdings IWB JSON (iShares Russell 1000 ETF)")
     print("Universo:", universe_meta)
 
     rows: list[dict] = []
