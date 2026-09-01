@@ -1,15 +1,19 @@
-"""Stress test C Score v1.2 sobre Russell 1000 vía holdings de IWB.
+"""Stress test C Score v1.2 sobre snapshot público del Russell 1000.
 
 Objetivos:
 - Mantener intacto C Score v1.2.
-- Usar una aproximación operativa reproducible al Russell 1000 mediante IWB.
-- Filtrar posiciones no-equity y validar que el universo tenga tamaño plausible.
+- Usar un universo fijo y reproducible de ~1000 compañías reales.
 - Medir robustez de adquisición, integridad, usabilidad y anomalías.
 - Guardar resultados y fallos para auditoría.
+
+El snapshot de componentes de Wikipedia está fechado 2026-04-02. Para este
+stress test importa la heterogeneidad y escala del universo, no replicar un
+rebalanceo actual del índice.
 """
 from __future__ import annotations
 
 from collections import Counter
+from io import StringIO
 import time
 
 import pandas as pd
@@ -17,11 +21,8 @@ import requests
 
 from fundamental_c import analyze_current_earnings
 
-IWB_AS_OF_DATE = "20260828"
-IWB_URL = (
-    "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/"
-    "1467271812596.ajax?fileType=json&tab=all&asOfDate=" + IWB_AS_OF_DATE
-)
+R1000_URL = "https://en.wikipedia.org/wiki/Russell_1000_Index"
+R1000_SNAPSHOT_DATE = "2026-04-02"
 OUTPUT_CSV = "russell1000_c_score_v12_results.csv"
 FAILURES_CSV = "russell1000_c_score_v12_failures.csv"
 MIN_PLAUSIBLE_UNIVERSE = 900
@@ -29,39 +30,28 @@ MAX_PLAUSIBLE_UNIVERSE = 1150
 
 
 def load_tickers() -> tuple[list[str], dict]:
-    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/1.0"}
-    response = requests.get(IWB_URL, headers=headers, timeout=60)
+    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/1.1"}
+    response = requests.get(R1000_URL, headers=headers, timeout=60)
     response.raise_for_status()
-    content_type = response.headers.get("content-type", "")
-    try:
-        payload = response.json()
-    except Exception as exc:
-        preview = response.text[:500].replace("\n", " ")
-        raise RuntimeError(
-            f"IWB no devolvió JSON válido para {IWB_AS_OF_DATE}: "
-            f"content_type={content_type!r}, preview={preview!r}"
-        ) from exc
+    tables = pd.read_html(StringIO(response.text))
 
-    rows = payload.get("aaData", [])
-    if not isinstance(rows, list) or not rows:
+    candidates = []
+    for table in tables:
+        cols = {str(c).strip() for c in table.columns}
+        if "Symbol" in cols and len(table) >= MIN_PLAUSIBLE_UNIVERSE:
+            candidates.append(table)
+    if not candidates:
         raise RuntimeError(
-            f"Respuesta JSON IWB sin aaData válido para {IWB_AS_OF_DATE}: "
-            f"keys={list(payload)[:20]}"
+            f"No se encontró tabla plausible Russell 1000: tablas={len(tables)}, "
+            f"filas={[len(t) for t in tables[:20]]}"
         )
 
-    tickers: list[str] = []
-    rejected: list[str] = []
-    equity_rows = 0
-
-    for item in rows:
-        if not isinstance(item, list) or len(item) < 4:
-            rejected.append("MALFORMED_ROW")
-            continue
-        asset_class = str(item[3]).strip().lower()
-        if asset_class != "equity":
-            continue
-        equity_rows += 1
-        ticker = str(item[0]).strip().upper().replace(".", "-")
+    frame = max(candidates, key=len)
+    raw_rows = len(frame)
+    tickers = []
+    rejected = []
+    for value in frame["Symbol"].dropna():
+        ticker = str(value).strip().upper().replace(".", "-")
         valid = (
             bool(ticker)
             and ticker not in {"-", "USD", "NONE", "NAN"}
@@ -76,15 +66,13 @@ def load_tickers() -> tuple[list[str], dict]:
     unique = sorted(set(tickers))
     if not MIN_PLAUSIBLE_UNIVERSE <= len(unique) <= MAX_PLAUSIBLE_UNIVERSE:
         raise RuntimeError(
-            f"Universo IWB no plausible: {len(unique)} tickers; esperado entre "
-            f"{MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}; "
-            f"aaData={len(rows)}, equity_rows={equity_rows}, rejected={len(rejected)}"
+            f"Universo Russell 1000 no plausible: {len(unique)} tickers; "
+            f"esperado entre {MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}"
         )
 
     meta = {
-        "as_of_date": IWB_AS_OF_DATE,
-        "raw_rows": len(rows),
-        "equity_rows": equity_rows,
+        "snapshot_date": R1000_SNAPSHOT_DATE,
+        "raw_rows": raw_rows,
         "unique_tickers": len(unique),
         "rejected_rows": len(rejected),
     }
@@ -129,7 +117,7 @@ def main() -> None:
     print("=" * 140)
     print("RUSSELL 1000 STRESS TEST — C SCORE V1.2")
     print("=" * 140)
-    print("Fuente operativa: holdings IWB JSON (iShares Russell 1000 ETF)")
+    print("Fuente operativa: snapshot público Russell 1000 (Wikipedia)")
     print("Universo:", universe_meta)
 
     rows: list[dict] = []
