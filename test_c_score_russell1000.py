@@ -29,9 +29,20 @@ def load_tickers() -> tuple[list[str], dict]:
     headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/0.8"}
     response = requests.get(IWB_URL, headers=headers, timeout=60)
     response.raise_for_status()
-    lines = response.text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("Ticker,"))
+    lines = response.text.replace("\ufeff", "").splitlines()
+
+    # iShares suele entrecomillar la cabecera ("Ticker","Name",...) y puede
+    # anteponer varias líneas de metadatos. No dependemos de una posición fija.
+    candidates = [
+        i for i, line in enumerate(lines)
+        if "Ticker" in line and "Asset Class" in line and "," in line
+    ]
+    if not candidates:
+        preview = " | ".join(lines[:8])[:1200]
+        raise RuntimeError(f"No se encontró cabecera de holdings IWB. Preview={preview!r}")
+    start = candidates[0]
     frame = pd.read_csv(StringIO("\n".join(lines[start:])))
+    frame.columns = [str(col).strip().strip('"') for col in frame.columns]
 
     raw_rows = len(frame)
     if "Asset Class" in frame.columns:
