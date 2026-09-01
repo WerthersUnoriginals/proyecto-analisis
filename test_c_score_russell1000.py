@@ -17,7 +17,11 @@ import requests
 
 from fundamental_c import analyze_current_earnings
 
-IWB_URL = "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/1467271812596.ajax?fileType=json&tab=all"
+IWB_AS_OF_DATE = "20260828"
+IWB_URL = (
+    "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/"
+    "1467271812596.ajax?fileType=json&tab=all&asOfDate=" + IWB_AS_OF_DATE
+)
 OUTPUT_CSV = "russell1000_c_score_v12_results.csv"
 FAILURES_CSV = "russell1000_c_score_v12_failures.csv"
 MIN_PLAUSIBLE_UNIVERSE = 900
@@ -25,13 +29,25 @@ MAX_PLAUSIBLE_UNIVERSE = 1150
 
 
 def load_tickers() -> tuple[list[str], dict]:
-    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/0.9"}
+    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/1.0"}
     response = requests.get(IWB_URL, headers=headers, timeout=60)
     response.raise_for_status()
-    payload = response.json()
+    content_type = response.headers.get("content-type", "")
+    try:
+        payload = response.json()
+    except Exception as exc:
+        preview = response.text[:500].replace("\n", " ")
+        raise RuntimeError(
+            f"IWB no devolvió JSON válido para {IWB_AS_OF_DATE}: "
+            f"content_type={content_type!r}, preview={preview!r}"
+        ) from exc
+
     rows = payload.get("aaData", [])
     if not isinstance(rows, list) or not rows:
-        raise RuntimeError(f"Respuesta JSON IWB sin aaData válido: keys={list(payload)[:20]}")
+        raise RuntimeError(
+            f"Respuesta JSON IWB sin aaData válido para {IWB_AS_OF_DATE}: "
+            f"keys={list(payload)[:20]}"
+        )
 
     tickers: list[str] = []
     rejected: list[str] = []
@@ -66,6 +82,7 @@ def load_tickers() -> tuple[list[str], dict]:
         )
 
     meta = {
+        "as_of_date": IWB_AS_OF_DATE,
         "raw_rows": len(rows),
         "equity_rows": equity_rows,
         "unique_tickers": len(unique),
