@@ -3,26 +3,31 @@ on:
   push:
     paths:
       - '.github/workflows/test-c-score-russell1000-v12.yml'
+      - 'test_c_score_russell1000.py'
   workflow_dispatch:
 jobs:
   stress-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependencies
         run: pip install requests pandas yfinance lxml
-      - name: Compile
+      - name: Compile modules
         run: python3 -m py_compile c_score_v1.py fundamental_c.py test_c_score_russell1000.py
       - name: Run Russell 1000 stress test
         run: python3 test_c_score_russell1000.py
-      - name: Upload CSV
+      - name: Upload audit CSVs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: russell1000-c-score-v12-results
-          path: russell1000_c_score_v12_results.csv
+          path: |
+            russell1000_c_score_v12_results.csv
+            russell1000_c_score_v12_failures.csv
           if-no-files-found: warn
