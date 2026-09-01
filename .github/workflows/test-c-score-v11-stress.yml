@@ -1,0 +1,22 @@
+name: Test C Score v1.1 stress
+
+on:
+  push:
+    paths:
+      - '.github/workflows/test-c-score-v11-stress.yml'
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests pandas yfinance lxml
+      - name: Run stress test v1.1
+        run: python3 test_c_score_stress_sp500.py
