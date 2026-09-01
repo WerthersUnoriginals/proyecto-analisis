@@ -1,4 +1,4 @@
-"""C Score v1.1 experimental para CAN SLIM+ v2.6.
+"""C Score v1.2 experimental para CAN SLIM+ v2.6.
 
 El score cuantifica la fortaleza de Current Earnings sin mezclarla con la
 integridad del dato. DATA_INTEGRITY sigue siendo un control independiente.
@@ -6,10 +6,15 @@ La sorpresa EPS se conserva como componente de 5 puntos, pero queda desactivada
 hasta validar su semántica en Yahoo/yfinance; el total se normaliza por los
 puntos realmente disponibles.
 
-v1.1 añade dos defensas sin modificar los pesos:
-- SMALL_BASE_RISK: detecta YoY extremos que parten de un EPS positivo minúsculo.
-- C_SCORE_USABLE / C_SCORE_REVIEW: separa el valor del score de su aptitud para
-  selección automática según integridad y completitud de los datos.
+v1.2 mantiene intactos pesos y score numérico de v1.1 y añade una defensa de
+selección automática para crecimiento fuerte con evidencia temporal muy corta:
+- LOW_PERSISTENCE_HIGH_SCORE: score >=70 con persistencia <=2 pasa a REVIEW.
+- LOW_PERSISTENCE_BASE_EFFECT: mismo caso cuando además existe BASE_EFFECT_RISK.
+- SMALL_BASE_RISK se mantiene como diagnóstico independiente.
+
+La filosofía es no castigar artificialmente el score de una compañía que puede
+estar iniciando una fase legítima de crecimiento, pero impedir que una señal con
+muy baja persistencia se use automáticamente sin revisión.
 """
 
 from __future__ import annotations
@@ -31,6 +36,8 @@ SALES_ACCEL_KNOTS = [(-15.0, 0.0), (-10.0, 2.0), (-5.0, 4.0), (0.0, 6.0), (5.0, 
 
 SMALL_BASE_EPS_MAX = 0.10
 SMALL_BASE_YOY_MIN = 100.0
+LOW_PERSISTENCE_SCORE_MIN = 70.0
+LOW_PERSISTENCE_MAX_POINTS = 2.0
 
 
 def _num(value) -> Optional[float]:
@@ -192,7 +199,6 @@ def build_c_score(report: dict) -> dict:
         sales_acceleration = min(sales_acceleration, 6.0)
     persistence = _persistence(report.get("eps_yoy_pct", []))
 
-    # Pendiente de validar semántica y normalización de earnings_history.
     surprise = None
 
     components = {
@@ -211,17 +217,32 @@ def build_c_score(report: dict) -> dict:
     if normalized is not None:
         normalized = round(normalized, 2)
 
+    low_persistence_high_score = bool(
+        normalized is not None
+        and normalized >= LOW_PERSISTENCE_SCORE_MIN
+        and persistence is not None
+        and persistence <= LOW_PERSISTENCE_MAX_POINTS
+    )
+    low_persistence_base_effect = bool(low_persistence_high_score and base_effect_risk)
+    if low_persistence_high_score:
+        flags.append("LOW_PERSISTENCE_HIGH_SCORE")
+    if low_persistence_base_effect:
+        flags.append("LOW_PERSISTENCE_BASE_EFFECT")
+
     data_integrity = str(report.get("data_integrity", ""))
     score_status = "OK"
     if data_integrity == "REVIEW_REQUIRED":
         score_status = "REVIEW_REQUIRED_DATA"
     elif available_points < 80:
         score_status = "PARTIAL_SCORE"
+    elif low_persistence_high_score:
+        score_status = "REVIEW_LOW_PERSISTENCE"
 
     needs_review = bool(
         data_integrity == "REVIEW_REQUIRED"
         or "PARTIAL_CORE_DATA" in data_integrity
         or available_points < 80
+        or low_persistence_high_score
     )
     usability = "C_SCORE_REVIEW" if needs_review else "C_SCORE_USABLE"
 
@@ -238,11 +259,15 @@ def build_c_score(report: dict) -> dict:
         diagnostic.append("EXTREME_GROWTH_FROM_SMALL_EPS_BASE")
     if persistence is not None and persistence >= 8:
         diagnostic.append("HIGH_PERSISTENCE")
+    if low_persistence_high_score:
+        diagnostic.append("HIGH_SCORE_WITH_LOW_PERSISTENCE")
+    if low_persistence_base_effect:
+        diagnostic.append("LOW_PERSISTENCE_BASE_EFFECT_REVIEW")
 
     return {
         "c_classic": _classic(report),
         "c_score_v1": {
-            "model_version": "1.1-exp",
+            "model_version": "1.2-exp",
             "raw_points": round(raw_points, 2),
             "available_points": round(available_points, 2),
             "normalized_score": normalized,
@@ -252,6 +277,12 @@ def build_c_score(report: dict) -> dict:
             "components": components,
             "diagnostic": diagnostic,
             "surprise_policy": "EXCLUDED_UNTIL_VERIFIED",
+            "low_persistence_policy": {
+                "review": low_persistence_high_score,
+                "score_threshold": LOW_PERSISTENCE_SCORE_MIN,
+                "persistence_max": LOW_PERSISTENCE_MAX_POINTS,
+                "base_effect": low_persistence_base_effect,
+            },
             "small_base": {
                 "risk": small_base_risk,
                 "inferred_previous_eps": inferred_previous_eps,
