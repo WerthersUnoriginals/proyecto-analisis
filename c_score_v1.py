@@ -1,10 +1,15 @@
-"""C Score v1 experimental para CAN SLIM+ v2.6.
+"""C Score v1.1 experimental para CAN SLIM+ v2.6.
 
 El score cuantifica la fortaleza de Current Earnings sin mezclarla con la
 integridad del dato. DATA_INTEGRITY sigue siendo un control independiente.
 La sorpresa EPS se conserva como componente de 5 puntos, pero queda desactivada
 hasta validar su semántica en Yahoo/yfinance; el total se normaliza por los
 puntos realmente disponibles.
+
+v1.1 añade dos defensas sin modificar los pesos:
+- SMALL_BASE_RISK: detecta YoY extremos que parten de un EPS positivo minúsculo.
+- C_SCORE_USABLE / C_SCORE_REVIEW: separa el valor del score de su aptitud para
+  selección automática según integridad y completitud de los datos.
 """
 
 from __future__ import annotations
@@ -23,6 +28,9 @@ SALES_GROWTH_KNOTS = [
     (20.0, 15.0), (25.0, 17.0), (35.0, 19.0), (50.0, 20.0),
 ]
 SALES_ACCEL_KNOTS = [(-15.0, 0.0), (-10.0, 2.0), (-5.0, 4.0), (0.0, 6.0), (5.0, 8.0), (10.0, 10.0)]
+
+SMALL_BASE_EPS_MAX = 0.10
+SMALL_BASE_YOY_MIN = 100.0
 
 
 def _num(value) -> Optional[float]:
@@ -103,6 +111,17 @@ def _score_class(score: Optional[float]) -> str:
     return "POOR"
 
 
+def _infer_previous_eps(latest_eps, eps_yoy) -> Optional[float]:
+    latest = _num(latest_eps)
+    yoy = _num(eps_yoy)
+    if latest is None or yoy is None:
+        return None
+    denominator = 1.0 + yoy / 100.0
+    if denominator <= 0:
+        return None
+    return latest / denominator
+
+
 def _classic(report: dict) -> dict:
     eps_yoy = _num(report.get("latest_eps_yoy_pct"))
     sales_yoy = _num(report.get("latest_revenue_yoy_pct"))
@@ -138,14 +157,23 @@ def build_c_score(report: dict) -> dict:
     sales_accel = _num(report.get("revenue_acceleration_pp"))
     previous_eps_yoy = _num(report.get("previous_eps_yoy_pct"))
     previous_sales_yoy = _num(report.get("previous_revenue_yoy_pct"))
+    inferred_previous_eps = _infer_previous_eps(report.get("latest_eps"), eps_yoy)
 
     flags: list[str] = []
     base_effect_risk = bool(
         previous_eps_yoy is not None and previous_eps_yoy < 0
         and eps_yoy is not None and eps_yoy >= 25.0
     )
+    small_base_risk = bool(
+        inferred_previous_eps is not None
+        and 0 < inferred_previous_eps <= SMALL_BASE_EPS_MAX
+        and eps_yoy is not None and eps_yoy >= SMALL_BASE_YOY_MIN
+        and not report.get("eps_loss_to_profit")
+    )
     if base_effect_risk:
         flags.append("BASE_EFFECT_RISK")
+    if small_base_risk:
+        flags.append("SMALL_BASE_RISK")
     if report.get("eps_loss_to_profit"):
         flags.append("LOSS_TO_PROFIT")
     if "ACCOUNTING_DIFFERENCE" in str(report.get("data_integrity", "")):
@@ -183,11 +211,19 @@ def build_c_score(report: dict) -> dict:
     if normalized is not None:
         normalized = round(normalized, 2)
 
+    data_integrity = str(report.get("data_integrity", ""))
     score_status = "OK"
-    if report.get("data_integrity") == "REVIEW_REQUIRED":
+    if data_integrity == "REVIEW_REQUIRED":
         score_status = "REVIEW_REQUIRED_DATA"
     elif available_points < 80:
         score_status = "PARTIAL_SCORE"
+
+    needs_review = bool(
+        data_integrity == "REVIEW_REQUIRED"
+        or "PARTIAL_CORE_DATA" in data_integrity
+        or available_points < 80
+    )
+    usability = "C_SCORE_REVIEW" if needs_review else "C_SCORE_USABLE"
 
     diagnostic = []
     if eps_yoy is not None and eps_yoy >= 50:
@@ -198,20 +234,31 @@ def build_c_score(report: dict) -> dict:
         diagnostic.append("SALES_CONFIRM_GROWTH")
     if base_effect_risk:
         diagnostic.append("RECOVERY_OR_BASE_EFFECT")
+    if small_base_risk:
+        diagnostic.append("EXTREME_GROWTH_FROM_SMALL_EPS_BASE")
     if persistence is not None and persistence >= 8:
         diagnostic.append("HIGH_PERSISTENCE")
 
     return {
         "c_classic": _classic(report),
         "c_score_v1": {
+            "model_version": "1.1-exp",
             "raw_points": round(raw_points, 2),
             "available_points": round(available_points, 2),
             "normalized_score": normalized,
             "class": _score_class(normalized),
             "status": score_status,
+            "usability": usability,
             "components": components,
             "diagnostic": diagnostic,
             "surprise_policy": "EXCLUDED_UNTIL_VERIFIED",
+            "small_base": {
+                "risk": small_base_risk,
+                "inferred_previous_eps": inferred_previous_eps,
+                "eps_threshold": SMALL_BASE_EPS_MAX,
+                "yoy_threshold_pct": SMALL_BASE_YOY_MIN,
+                "score_penalty": 0.0,
+            },
         },
         "c_flags": flags,
     }
