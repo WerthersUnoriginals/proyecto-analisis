@@ -1,0 +1,22 @@
+name: SEC history test
+
+on:
+  push:
+    paths:
+      - 'test_sec_history.py'
+      - '.github/workflows/sec-history-test.yml'
+
+jobs:
+  run-sec-history-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests pandas
+      - name: Run SEC history test
+        run: python3 test_sec_history.py
