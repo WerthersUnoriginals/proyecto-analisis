@@ -6,9 +6,9 @@ Objetivos:
 - Medir robustez de adquisición, integridad, usabilidad y anomalías.
 - Guardar resultados y fallos para auditoría.
 
-El snapshot de componentes de Wikipedia está fechado 2026-04-02. Para este
-stress test importa la heterogeneidad y escala del universo, no replicar un
-rebalanceo actual del índice.
+El universo usa el snapshot publicado por Equibles a partir del basket diario
+de IWB de 2026-08-28. Es una aproximación de tracking fund, no el feed oficial
+licenciado de FTSE Russell, y se utiliza exclusivamente como universo de estrés.
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ import requests
 
 from fundamental_c import analyze_current_earnings
 
-R1000_URL = "https://en.wikipedia.org/wiki/Russell_1000_Index"
-R1000_SNAPSHOT_DATE = "2026-04-02"
+R1000_URL = "https://equibles.com/indexes/russell-1000.csv"
+R1000_SNAPSHOT_DATE = "2026-08-28"
 OUTPUT_CSV = "russell1000_c_score_v12_results.csv"
 FAILURES_CSV = "russell1000_c_score_v12_failures.csv"
 MIN_PLAUSIBLE_UNIVERSE = 900
@@ -30,28 +30,26 @@ MAX_PLAUSIBLE_UNIVERSE = 1150
 
 
 def load_tickers() -> tuple[list[str], dict]:
-    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/1.1"}
+    headers = {"User-Agent": "Mozilla/5.0 CANSLIMResearch/1.2"}
     response = requests.get(R1000_URL, headers=headers, timeout=60)
     response.raise_for_status()
-    tables = pd.read_html(StringIO(response.text))
+    frame = pd.read_csv(StringIO(response.text))
+    if frame.empty:
+        raise RuntimeError("CSV Russell 1000 vacío")
 
-    candidates = []
-    for table in tables:
-        cols = {str(c).strip() for c in table.columns}
-        if "Symbol" in cols and len(table) >= MIN_PLAUSIBLE_UNIVERSE:
-            candidates.append(table)
-    if not candidates:
-        raise RuntimeError(
-            f"No se encontró tabla plausible Russell 1000: tablas={len(tables)}, "
-            f"filas={[len(t) for t in tables[:20]]}"
-        )
+    col_map = {str(c).strip().lower(): c for c in frame.columns}
+    ticker_col = next((col_map[k] for k in ("ticker", "symbol") if k in col_map), None)
+    if ticker_col is None:
+        raise RuntimeError(f"CSV sin columna ticker/symbol: {list(frame.columns)}")
 
-    frame = max(candidates, key=len)
     raw_rows = len(frame)
     tickers = []
     rejected = []
-    for value in frame["Symbol"].dropna():
+    for value in frame[ticker_col].dropna():
         ticker = str(value).strip().upper().replace(".", "-")
+        # Equibles/IWB usa BRKB; Yahoo/SEC y nuestro resto del sistema usan BRK-B.
+        if ticker == "BRKB":
+            ticker = "BRK-B"
         valid = (
             bool(ticker)
             and ticker not in {"-", "USD", "NONE", "NAN"}
@@ -67,7 +65,8 @@ def load_tickers() -> tuple[list[str], dict]:
     if not MIN_PLAUSIBLE_UNIVERSE <= len(unique) <= MAX_PLAUSIBLE_UNIVERSE:
         raise RuntimeError(
             f"Universo Russell 1000 no plausible: {len(unique)} tickers; "
-            f"esperado entre {MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}"
+            f"esperado entre {MIN_PLAUSIBLE_UNIVERSE} y {MAX_PLAUSIBLE_UNIVERSE}; "
+            f"filas={raw_rows}, rechazadas={len(rejected)}"
         )
 
     meta = {
@@ -117,7 +116,7 @@ def main() -> None:
     print("=" * 140)
     print("RUSSELL 1000 STRESS TEST — C SCORE V1.2")
     print("=" * 140)
-    print("Fuente operativa: snapshot público Russell 1000 (Wikipedia)")
+    print("Fuente operativa: Equibles/IWB snapshot Russell 1000")
     print("Universo:", universe_meta)
 
     rows: list[dict] = []
