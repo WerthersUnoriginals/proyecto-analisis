@@ -1,0 +1,23 @@
+name: Stress test C Score S&P 500
+
+on:
+  push:
+    paths:
+      - 'test_c_score_stress_sp500.py'
+      - '.github/workflows/test-c-score-stress-sp500.yml'
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install requests pandas yfinance lxml
+      - name: Run stress test
+        run: python3 test_c_score_stress_sp500.py
