@@ -1,13 +1,15 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2.5
+CAN SLIM+ — Módulo C: Current Earnings v2.5.1
 
-Mejoras v2.5:
+Mejoras v2.5.1:
 - SEC Company Facts como histórico principal y Yahoo/yfinance como complemento.
 - YoY por trimestre comparable real, no por posición i-4.
-- Resolver ticker→CIK con caché, yfinance/filings y catálogo SEC como fallback.
+- Resolver ticker→CIK con caché, yfinance/filings, catálogo SEC y un mapping
+  pre-generado desde datos SEC como fallback externo.
 - Detección de splits con yfinance.
 - Verificación de EPS SEC mediante Net Income / Diluted Shares para comprobar si
   los datos históricos ya están ajustados por splits antes de tocar nada.
+- Más variantes XBRL para diluted shares.
 - Control explícito de discrepancias SEC↔Yahoo por métrica.
 
 No aplica todavía un score CAN SLIM definitivo.
@@ -21,7 +23,6 @@ from __future__ import annotations
 import math
 import re
 import time
-from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -42,7 +43,7 @@ CIK_CACHE = {
 }
 
 SEC_HEADERS = {
-    "User-Agent": "CANSLIMResearch/0.3 educational-research",
+    "User-Agent": "CANSLIMResearch/0.4 educational-research",
     "Accept-Encoding": "gzip, deflate",
     "Accept": "application/json",
 }
@@ -52,6 +53,13 @@ SEC_TICKER_URLS = [
     "https://www.sec.gov/files/company_tickers.json",
     "https://www.sec.gov/files/company_tickers_exchange.json",
 ]
+# Fallback mantenido por sec-cik-mapper. Sus ficheros se generan a partir de
+# los datos públicos de la SEC y permiten resolver el CIK cuando www.sec.gov
+# bloquea el catálogo desde determinados entornos cloud.
+SEC_CIK_MAPPER_URL = (
+    "https://raw.githubusercontent.com/jadchaar/sec-cik-mapper/main/"
+    "auto_generated_mappings/stocks/ticker_to_cik.json"
+)
 
 SEC_TAG_CANDIDATES = {
     "EPS_DILUTED": ["EarningsPerShareDiluted"],
@@ -62,7 +70,10 @@ SEC_TAG_CANDIDATES = {
         "SalesRevenueGoodsNet",
     ],
     "NET_INCOME": ["NetIncomeLoss", "ProfitLoss"],
-    "DILUTED_SHARES": ["WeightedAverageNumberOfDilutedSharesOutstanding"],
+    "DILUTED_SHARES": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+    ],
 }
 
 SEC_UNIT_PREFERENCE = {
@@ -294,6 +305,23 @@ def _cik_from_sec_catalog(symbol: str) -> Optional[str]:
     return None
 
 
+def _cik_from_sec_cik_mapper(symbol: str) -> Optional[str]:
+    try:
+        response = requests.get(
+            SEC_CIK_MAPPER_URL,
+            headers={"User-Agent": SEC_HEADERS["User-Agent"], "Accept": "application/json"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cik = payload.get(symbol.upper())
+    return str(cik).zfill(10) if cik is not None else None
+
+
 def _resolve_cik(symbol: str, stock=None) -> tuple[Optional[str], str]:
     symbol = symbol.upper()
     if symbol in CIK_CACHE:
@@ -309,6 +337,11 @@ def _resolve_cik(symbol: str, stock=None) -> tuple[Optional[str], str]:
     if cik:
         CIK_CACHE[symbol] = cik
         return cik, "sec_catalog"
+
+    cik = _cik_from_sec_cik_mapper(symbol)
+    if cik:
+        CIK_CACHE[symbol] = cik
+        return cik, "sec_cik_mapper"
 
     return None, "unresolved"
 
@@ -715,7 +748,7 @@ def analyze_current_earnings(ticker: str) -> dict:
 
     return {
         "ticker": symbol,
-        "version": "2.5",
+        "version": "2.5.1",
         "data_source": "SEC Company Facts + Yahoo Finance/yfinance",
         "cik": cik,
         "cik_source": cik_source,
@@ -831,6 +864,7 @@ def print_report(report: dict) -> None:
     print(f"  Híbrido EPS / ventas:   {report['quarters_eps_available']} / {report['quarters_revenue_available']}")
     print(f"  YoY EPS calculables:    {report['eps_yoy_calculable']}")
     print(f"  YoY ventas calculables: {report['revenue_yoy_calculable']}")
+    print(f"  Tags SEC:               {report['sec_tags']}")
     print(f"  Calidad:                {report['data_quality']}")
 
     print("\n[HISTÓRICO EPS YoY]")
