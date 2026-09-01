@@ -95,6 +95,8 @@ def _clean_number(value) -> Optional[float]:
 def _to_timestamp(value) -> Optional[pd.Timestamp]:
     try:
         ts = pd.Timestamp(value)
+        if pd.isna(ts):
+            return None
         if ts.tzinfo is not None:
             ts = ts.tz_localize(None)
         return ts
@@ -383,7 +385,10 @@ def _get_yfinance_splits(stock, years: int = 6) -> tuple[pd.Series, Optional[str
 
 def _days_between(start, end) -> Optional[int]:
     s, e = _to_timestamp(start), _to_timestamp(end)
-    return None if s is None or e is None else int((e - s).days)
+    if s is None or e is None:
+        return None
+    delta = (e - s).days
+    return int(delta) if pd.notna(delta) else None
 
 
 def _quarter_like_fact(item: dict) -> bool:
