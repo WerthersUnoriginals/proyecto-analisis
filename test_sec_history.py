@@ -12,7 +12,6 @@ Requiere:
 
 from __future__ import annotations
 
-import re
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -24,13 +23,22 @@ import requests
 TICKERS = ["NVDA", "MSFT", "COST", "XOM", "AMZN"]
 YEARS = 6
 
+# Para este test evitamos una segunda llamada a www.sec.gov sólo para resolver
+# ticker→CIK. Los CIK son identificadores públicos y estables de la SEC.
+CIK_MAP = {
+    "NVDA": "0001045810",
+    "MSFT": "0000789019",
+    "COST": "0000909832",
+    "XOM": "0000034088",
+    "AMZN": "0001018724",
+}
+
 HEADERS = {
     "User-Agent": "CANSLIMResearch/0.1 educational-research",
     "Accept-Encoding": "gzip, deflate",
-    "Host": "data.sec.gov",
+    "Accept": "application/json",
 }
 
-TICKER_URL = "https://www.sec.gov/files/company_tickers.json"
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
 TAG_CANDIDATES = {
@@ -56,25 +64,10 @@ UNIT_PREFERENCE = {
 }
 
 
-def _get_json(url: str, headers: Optional[dict] = None) -> dict:
-    response = requests.get(url, headers=headers or HEADERS, timeout=30)
+def _get_json(url: str) -> dict:
+    response = requests.get(url, headers=HEADERS, timeout=30)
     response.raise_for_status()
     return response.json()
-
-
-def get_ticker_map() -> dict[str, str]:
-    headers = {
-        "User-Agent": HEADERS["User-Agent"],
-        "Accept-Encoding": "gzip, deflate",
-    }
-    payload = _get_json(TICKER_URL, headers=headers)
-    mapping = {}
-    for item in payload.values():
-        ticker = str(item.get("ticker", "")).upper().strip()
-        cik = str(item.get("cik_str", "")).zfill(10)
-        if ticker and cik:
-            mapping[ticker] = cik
-    return mapping
 
 
 def _days_between(start: str, end: str) -> Optional[int]:
@@ -215,18 +208,12 @@ def main() -> None:
     print(f"Ventana: últimos ~{YEARS} años")
     print("Fuente: SEC Company Facts")
 
-    try:
-        ticker_map = get_ticker_map()
-    except Exception as exc:
-        print(f"ERROR descargando mapa ticker→CIK: {type(exc).__name__}: {exc}")
-        return
-
     for ticker in TICKERS:
         print("\n" + "=" * 72)
         print(f"TICKER: {ticker}")
         print("=" * 72)
 
-        cik = ticker_map.get(ticker)
+        cik = CIK_MAP.get(ticker)
         if not cik:
             print("CIK no encontrado")
             continue
@@ -239,11 +226,15 @@ def main() -> None:
             print(f"ERROR SEC Company Facts: {type(exc).__name__}: {exc}")
             continue
 
+        entity_name = facts.get("entityName")
+        if entity_name:
+            print(f"Entidad SEC: {entity_name}")
+
         for metric in ["EPS_DILUTED", "REVENUE", "NET_INCOME"]:
             df, tag = _best_series(facts, metric, YEARS)
             print_metric(metric, df, tag)
 
-        time.sleep(0.2)
+        time.sleep(0.25)
 
     print("\n" + "=" * 72)
     print("FIN DEL TEST")
