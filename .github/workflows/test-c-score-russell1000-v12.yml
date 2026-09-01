@@ -31,3 +31,4 @@ jobs:
             russell1000_c_score_v12_results.csv
             russell1000_c_score_v12_failures.csv
           if-no-files-found: warn
+# parser IWB tolerante a BOM y cabeceras entrecomilladas
