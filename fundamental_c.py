@@ -1,15 +1,16 @@
 """
-CAN SLIM+ — Módulo C: Current Earnings v2.5.1
+CAN SLIM+ — Módulo C: Current Earnings v2.5.2
 
-Mejoras v2.5.1:
+Mejoras v2.5.2:
 - SEC Company Facts como histórico principal y Yahoo/yfinance como complemento.
 - YoY por trimestre comparable real, no por posición i-4.
-- Resolver ticker→CIK con caché, yfinance/filings, catálogo SEC y un mapping
+- Resolver ticker→CIK con caché, yfinance/filings, catálogo SEC y mapping
   pre-generado desde datos SEC como fallback externo.
 - Detección de splits con yfinance.
 - Verificación de EPS SEC mediante Net Income / Diluted Shares para comprobar si
   los datos históricos ya están ajustados por splits antes de tocar nada.
-- Más variantes XBRL para diluted shares.
+- Discovery conservador de conceptos XBRL de diluted shares cuando los tags
+  estándar no aparecen.
 - Control explícito de discrepancias SEC↔Yahoo por métrica.
 
 No aplica todavía un score CAN SLIM definitivo.
@@ -30,10 +31,6 @@ import requests
 import yfinance as yf
 
 
-# ---------------------------------------------------------------------------
-# Configuración
-# ---------------------------------------------------------------------------
-
 CIK_CACHE = {
     "NVDA": "0001045810",
     "MSFT": "0000789019",
@@ -43,7 +40,7 @@ CIK_CACHE = {
 }
 
 SEC_HEADERS = {
-    "User-Agent": "CANSLIMResearch/0.4 educational-research",
+    "User-Agent": "CANSLIMResearch/0.5 educational-research",
     "Accept-Encoding": "gzip, deflate",
     "Accept": "application/json",
 }
@@ -53,12 +50,9 @@ SEC_TICKER_URLS = [
     "https://www.sec.gov/files/company_tickers.json",
     "https://www.sec.gov/files/company_tickers_exchange.json",
 ]
-# Fallback mantenido por sec-cik-mapper. Sus ficheros se generan a partir de
-# los datos públicos de la SEC y permiten resolver el CIK cuando www.sec.gov
-# bloquea el catálogo desde determinados entornos cloud.
 SEC_CIK_MAPPER_URL = (
     "https://raw.githubusercontent.com/jadchaar/sec-cik-mapper/main/"
-    "auto_generated_mappings/stocks/ticker_to_cik.json"
+    "mappings/stocks/ticker_to_cik.json"
 )
 
 SEC_TAG_CANDIDATES = {
@@ -87,10 +81,6 @@ SPLIT_INTEGRITY_TOLERANCE_PCT = 5.0
 SOURCE_OK_TOLERANCE_PCT = 1.0
 SOURCE_ACCOUNTING_TOLERANCE_PCT = 5.0
 
-
-# ---------------------------------------------------------------------------
-# Utilidades generales
-# ---------------------------------------------------------------------------
 
 def _clean_number(value) -> Optional[float]:
     if value is None:
@@ -250,10 +240,6 @@ def _latest_comparable_value(sec: pd.Series, yahoo: pd.Series):
     return latest_value, prior, source, latest_date, prior_date
 
 
-# ---------------------------------------------------------------------------
-# Resolver CIK
-# ---------------------------------------------------------------------------
-
 def _walk_strings(obj):
     if isinstance(obj, str):
         yield obj
@@ -285,7 +271,6 @@ def _cik_from_sec_catalog(symbol: str) -> Optional[str]:
             payload = response.json()
         except Exception:
             continue
-
         if isinstance(payload, dict) and "data" in payload and "fields" in payload:
             fields = payload.get("fields", [])
             try:
@@ -326,29 +311,21 @@ def _resolve_cik(symbol: str, stock=None) -> tuple[Optional[str], str]:
     symbol = symbol.upper()
     if symbol in CIK_CACHE:
         return CIK_CACHE[symbol], "cache"
-
     if stock is not None:
         cik = _cik_from_yfinance_filings(stock)
         if cik:
             CIK_CACHE[symbol] = cik
             return cik, "yfinance_sec_filings"
-
     cik = _cik_from_sec_catalog(symbol)
     if cik:
         CIK_CACHE[symbol] = cik
         return cik, "sec_catalog"
-
     cik = _cik_from_sec_cik_mapper(symbol)
     if cik:
         CIK_CACHE[symbol] = cik
         return cik, "sec_cik_mapper"
-
     return None, "unresolved"
 
-
-# ---------------------------------------------------------------------------
-# Yahoo
-# ---------------------------------------------------------------------------
 
 def _fetch_yahoo_timeseries(ticker: str, series_types: list[str], years: int = 5):
     now = int(time.time())
@@ -404,10 +381,6 @@ def _get_yfinance_splits(stock, years: int = 6) -> tuple[pd.Series, Optional[str
     return splits[splits.index >= cutoff].sort_index().astype(float), None
 
 
-# ---------------------------------------------------------------------------
-# SEC Company Facts
-# ---------------------------------------------------------------------------
-
 def _days_between(start, end) -> Optional[int]:
     s, e = _to_timestamp(start), _to_timestamp(end)
     return None if s is None or e is None else int((e - s).days)
@@ -420,33 +393,66 @@ def _quarter_like_fact(item: dict) -> bool:
     return duration is not None and 70 <= duration <= 110
 
 
-def _extract_sec_metric(facts: dict, metric: str, years: int) -> tuple[pd.Series, Optional[str]]:
+def _series_from_sec_concept(concept: dict, metric: str, years: int) -> pd.Series:
     cutoff = _now_naive() - pd.DateOffset(years=years)
+    units = concept.get("units", {})
+    unit = next((u for u in SEC_UNIT_PREFERENCE[metric] if u in units), None)
+    if unit is None:
+        return pd.Series(dtype="float64")
+    rows = []
+    for item in units[unit]:
+        if not _quarter_like_fact(item):
+            continue
+        end = _to_timestamp(item.get("end"))
+        value = _clean_number(item.get("val"))
+        filed = _to_timestamp(item.get("filed")) or pd.Timestamp.min
+        if end is None or value is None or end < cutoff:
+            continue
+        rows.append((end, filed, value))
+    if not rows:
+        return pd.Series(dtype="float64")
+    frame = pd.DataFrame(rows, columns=["end", "filed", "value"])
+    frame = frame.sort_values(["end", "filed"]).drop_duplicates("end", keep="last")
+    return pd.Series(frame.set_index("end")["value"].astype(float).to_dict(), dtype="float64").sort_index()
+
+
+def _discover_diluted_shares_tags(facts: dict) -> list[str]:
+    scored = []
+    for tag, concept in facts.get("facts", {}).get("us-gaap", {}).items():
+        units = concept.get("units", {})
+        if "shares" not in units:
+            continue
+        text = f"{tag} {concept.get('label', '')} {concept.get('description', '')}".lower()
+        if "weighted average" not in text and "weightedaverage" not in text:
+            continue
+        if "share" not in text:
+            continue
+        score = 0
+        if "diluted" in text:
+            score += 10
+        if "basic and diluted" in text or "basicanddiluted" in text:
+            score += 8
+        if "outstanding" in text:
+            score += 3
+        if "adjustment" in text:
+            score -= 8
+        scored.append((score, tag))
+    return [tag for _, tag in sorted(scored, key=lambda x: (-x[0], x[1]))]
+
+
+def _extract_sec_metric(facts: dict, metric: str, years: int) -> tuple[pd.Series, Optional[str]]:
     best_series = pd.Series(dtype="float64")
     best_tag = None
-    for tag in SEC_TAG_CANDIDATES[metric]:
+    candidates = list(SEC_TAG_CANDIDATES[metric])
+    if metric == "DILUTED_SHARES":
+        for tag in _discover_diluted_shares_tags(facts):
+            if tag not in candidates:
+                candidates.append(tag)
+    for tag in candidates:
         concept = facts.get("facts", {}).get("us-gaap", {}).get(tag)
         if not concept:
             continue
-        units = concept.get("units", {})
-        unit = next((u for u in SEC_UNIT_PREFERENCE[metric] if u in units), None)
-        if unit is None:
-            continue
-        rows = []
-        for item in units[unit]:
-            if not _quarter_like_fact(item):
-                continue
-            end = _to_timestamp(item.get("end"))
-            value = _clean_number(item.get("val"))
-            filed = _to_timestamp(item.get("filed")) or pd.Timestamp.min
-            if end is None or value is None or end < cutoff:
-                continue
-            rows.append((end, filed, value))
-        if not rows:
-            continue
-        frame = pd.DataFrame(rows, columns=["end", "filed", "value"])
-        frame = frame.sort_values(["end", "filed"]).drop_duplicates("end", keep="last")
-        candidate = pd.Series(frame.set_index("end")["value"].astype(float).to_dict(), dtype="float64").sort_index()
+        candidate = _series_from_sec_concept(concept, metric, years)
         if len(candidate) > len(best_series):
             best_series, best_tag = candidate, tag
     return best_series, best_tag
@@ -462,7 +468,6 @@ def _fetch_sec_companyfacts(symbol: str, stock=None, years: int = 6):
         facts = response.json()
     except (requests.RequestException, ValueError) as exc:
         return {}, {}, cik, cik_source, str(exc)
-
     out, tags = {}, {}
     for metric in SEC_TAG_CANDIDATES:
         series, tag = _extract_sec_metric(facts, metric, years)
@@ -471,10 +476,6 @@ def _fetch_sec_companyfacts(symbol: str, stock=None, years: int = 6):
             tags[metric] = tag or "N/D"
     return out, tags, cik, cik_source, None
 
-
-# ---------------------------------------------------------------------------
-# Controles de integridad
-# ---------------------------------------------------------------------------
 
 def _implied_eps_check(eps: pd.Series, net_income: pd.Series, diluted_shares: pd.Series) -> list[dict]:
     checks = []
@@ -518,27 +519,23 @@ def _assess_split_integrity(splits, eps, net_income, diluted_shares) -> list[dic
         after = min(after_dates) if after_dates else None
         before_check = _check_for_date(checks, before)
         after_check = _check_for_date(checks, after)
-
         sh_before_date = _nearest_index(diluted_shares, before, 35) if before is not None else None
         sh_after_date = _nearest_index(diluted_shares, after, 35) if after is not None else None
         sh_before = float(diluted_shares.loc[sh_before_date]) if sh_before_date is not None else None
         sh_after = float(diluted_shares.loc[sh_after_date]) if sh_after_date is not None else None
         observed_ratio = sh_after / sh_before if sh_before and sh_after else None
-
         both_eps_pass = bool(before_check and after_check and before_check["pass"] and after_check["pass"])
         if observed_ratio is not None:
             dist_to_one = abs(math.log(max(observed_ratio, 1e-12)))
             dist_to_split = abs(math.log(max(observed_ratio, 1e-12) / max(float(split_ratio), 1e-12)))
         else:
             dist_to_one = dist_to_split = None
-
         if both_eps_pass and observed_ratio is not None and dist_to_one < dist_to_split:
             status = "ALREADY_ADJUSTED"
         elif both_eps_pass and observed_ratio is not None and dist_to_split < dist_to_one:
             status = "UNADJUSTED"
         else:
             status = "REVIEW_REQUIRED"
-
         events.append({
             "date": split_date.strftime("%Y-%m-%d"),
             "ratio": float(split_ratio),
@@ -581,10 +578,6 @@ def _split_between(splits: pd.Series, prior_date, current_date) -> bool:
     return bool(((splits.index > pd.Timestamp(prior_date)) & (splits.index <= pd.Timestamp(current_date))).any())
 
 
-# ---------------------------------------------------------------------------
-# Yahoo auxiliares
-# ---------------------------------------------------------------------------
-
 def _history_records(history: pd.DataFrame, n: int = 8) -> list[dict]:
     if history is None or history.empty:
         return []
@@ -619,14 +612,9 @@ def _extract_estimate_table(table: Optional[pd.DataFrame], aliases: dict[str, li
     return result
 
 
-# ---------------------------------------------------------------------------
-# Análisis principal
-# ---------------------------------------------------------------------------
-
 def analyze_current_earnings(ticker: str) -> dict:
     symbol = ticker.upper().strip()
     stock = yf.Ticker(symbol)
-
     try:
         income = stock.quarterly_income_stmt
         income_error = None
@@ -673,7 +661,6 @@ def analyze_current_earnings(ticker: str) -> dict:
         split_integrity_status = "UNADJUSTED_DETECTED"
     else:
         split_integrity_status = "REVIEW_REQUIRED"
-
     current_yoy_crosses_split = _split_between(splits, previous_eps_date, latest_eps_date)
 
     consistency = {
@@ -740,7 +727,6 @@ def analyze_current_earnings(ticker: str) -> dict:
         data_quality = "parcial"
     else:
         data_quality = "insuficiente"
-
     if current_yoy_crosses_split and split_integrity_status in {"UNADJUSTED_DETECTED", "REVIEW_REQUIRED", "UNKNOWN"}:
         data_quality = "revision_split"
 
@@ -748,7 +734,7 @@ def analyze_current_earnings(ticker: str) -> dict:
 
     return {
         "ticker": symbol,
-        "version": "2.5.1",
+        "version": "2.5.2",
         "data_source": "SEC Company Facts + Yahoo Finance/yfinance",
         "cik": cik,
         "cik_source": cik_source,
@@ -799,10 +785,6 @@ def analyze_current_earnings(ticker: str) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Informe consola
-# ---------------------------------------------------------------------------
-
 def _fmt(value, suffix="") -> str:
     return "N/D" if value is None else f"{value:.2f}{suffix}"
 
@@ -812,7 +794,6 @@ def print_report(report: dict) -> None:
     print(f"CAN SLIM+ v{report['version']} | C — {report['ticker']}")
     print(f"{'=' * 78}")
     print(f"CIK: {report['cik'] or 'N/D'} | resolver: {report['cik_source']}")
-
     if report.get("error"):
         print(f"Aviso yfinance: {report['error']}")
     if report.get("timeseries_error"):
@@ -821,19 +802,16 @@ def print_report(report: dict) -> None:
         print(f"Aviso SEC: {report['sec_error']}")
     if report.get("splits_error"):
         print(f"Aviso splits: {report['splits_error']}")
-
     print("\n[EPS]")
     print(f"  Último EPS:             {_fmt(report['latest_eps'])}")
     print(f"  Fuente último EPS:      {report['latest_eps_source'] or 'N/D'}")
     print(f"  EPS YoY actual:         {_fmt(report['latest_eps_yoy_pct'], '%')}")
     print(f"  EPS YoY anterior:       {_fmt(report['previous_eps_yoy_pct'], '%')}")
     print(f"  Aceleración EPS:        {_fmt(report['eps_acceleration_pp'], ' pp')}")
-
     print("\n[VENTAS]")
     print(f"  Ventas YoY actual:      {_fmt(report['latest_revenue_yoy_pct'], '%')}")
     print(f"  Ventas YoY anterior:    {_fmt(report['previous_revenue_yoy_pct'], '%')}")
     print(f"  Aceleración ventas:     {_fmt(report['revenue_acceleration_pp'], ' pp')}")
-
     print("\n[SPLITS / INTEGRIDAD EPS]")
     print(f"  Estado:                 {report['split_integrity_status']}")
     print(f"  YoY actual cruza split: {report['current_yoy_crosses_split']}")
@@ -845,18 +823,15 @@ def print_report(report: dict) -> None:
             f"shares ratio={_fmt(event['diluted_shares_observed_ratio'])} | "
             f"EPS diff antes/después={_fmt(event['before_eps_diff_pct'], '%')}/{_fmt(event['after_eps_diff_pct'], '%')}"
         )
-
     print("\n[CONSISTENCIA SEC ↔ YAHOO]")
     for metric, info in report["source_consistency"].items():
         print(
             f"  {metric:10s}: {info['status']} | solapes={info['overlaps']} | "
             f"max diff={_fmt(info['max_diff_pct'], '%')} | media={_fmt(info['avg_diff_pct'], '%')}"
         )
-
     print("\n[SORPRESA EPS]")
     print(f"  Última sorpresa:        {_fmt(report['latest_eps_surprise_pct'], '%')}")
     print(f"  Sorpresas positivas:    {report['positive_surprises_count']}/{report['surprises_available']}")
-
     print("\n[DATOS]")
     print(f"  SEC EPS / ventas:       {report['sec_eps_quarters']} / {report['sec_revenue_quarters']}")
     print(f"  SEC diluted shares:     {report['sec_diluted_shares_quarters']}")
@@ -866,15 +841,12 @@ def print_report(report: dict) -> None:
     print(f"  YoY ventas calculables: {report['revenue_yoy_calculable']}")
     print(f"  Tags SEC:               {report['sec_tags']}")
     print(f"  Calidad:                {report['data_quality']}")
-
     print("\n[HISTÓRICO EPS YoY]")
     for item in report["eps_yoy_pct"]:
         print(f"  {item['date']}: {item['value']:+.2f}%")
-
     print("\n[HISTÓRICO VENTAS YoY]")
     for item in report["revenue_yoy_pct"]:
         print(f"  {item['date']}: {item['value']:+.2f}%")
-
     if report.get("growth_estimates"):
         print("\n[CRECIMIENTO ESTIMADO]")
         for name, values in report["growth_estimates"].items():
@@ -882,7 +854,6 @@ def print_report(report: dict) -> None:
 
 
 if __name__ == "__main__":
-    # AAPL se incluye para validar el resolver CIK fuera de la caché inicial.
     TEST_TICKERS = ["NVDA", "MSFT", "COST", "XOM", "AMZN", "AAPL"]
     for ticker in TEST_TICKERS:
         print_report(analyze_current_earnings(ticker))
