@@ -46,28 +46,7 @@ FIND_RAW_SQL = """
     LIMIT 1;
 """
 
-LATEST_SEC_RAW_SQL = """
-    WITH ranked AS (
-        SELECT
-            id,
-            company_id,
-            metric,
-            period_start,
-            period_end,
-            filed_date,
-            fiscal_year,
-            fiscal_quarter,
-            form_type,
-            value,
-            xbrl_tag,
-            ROW_NUMBER() OVER (
-                PARTITION BY metric, period_end
-                ORDER BY filed_date DESC NULLS LAST, id DESC
-            ) AS rn
-        FROM fundamentals_raw
-        WHERE company_id = %s
-          AND source = 'SEC'
-    )
+ALL_SEC_RAW_SQL = """
     SELECT
         id,
         metric,
@@ -79,9 +58,10 @@ LATEST_SEC_RAW_SQL = """
         form_type,
         value,
         xbrl_tag
-    FROM ranked
-    WHERE rn = 1
-    ORDER BY period_end, metric;
+    FROM fundamentals_raw
+    WHERE company_id = %s
+      AND source = 'SEC'
+    ORDER BY period_end, metric, filed_date, id;
 """
 
 UPSERT_QUARTERLY_SQL = """
@@ -153,7 +133,7 @@ UPSERT_QUARTERLY_SQL = """
     RETURNING id;
 """
 
-NORMALIZER_VERSION = "sec-quarterly-v1"
+NORMALIZER_VERSION = "sec-quarterly-v2"
 
 
 def _payload_value(source_payload):
@@ -274,23 +254,76 @@ def _shares_quality_from_tag(tag):
     return "REVIEW_REQUIRED"
 
 
-def _latest_non_null(rows, key):
-    ordered = sorted(
-        rows,
-        key=lambda row: (row.get("filed_date") or date.min, row["id"]),
-        reverse=True,
+def _select_latest_metric_rows(rows):
+    """Selecciona el hecho vigente de cada métrica para un period_end."""
+
+    selected = {}
+    for row in rows:
+        metric = row["metric"]
+        current = selected.get(metric)
+        row_key = (row.get("filed_date") or date.min, row["id"])
+        current_key = (
+            (current.get("filed_date") or date.min, current["id"])
+            if current is not None
+            else None
+        )
+        if current is None or row_key > current_key:
+            selected[metric] = row
+    return selected
+
+
+def _original_fiscal_metadata(rows):
+    """
+    Obtiene identidad fiscal desde la presentación original del período.
+
+    SEC puede repetir un trimestre antiguo en filings posteriores y asignarle
+    el FY/FP del filing posterior. Para identificar el trimestre histórico se
+    usa la presentación más antigua disponible del period_end, mientras los
+    valores normalizados siguen usando el hecho más recientemente presentado.
+    """
+
+    candidates = [row for row in rows if row.get("fiscal_year") is not None]
+    if not candidates:
+        candidates = list(rows)
+
+    candidates.sort(
+        key=lambda row: (
+            row.get("filed_date") is None,
+            row.get("filed_date") or date.max,
+            row["id"],
+        )
     )
-    for row in ordered:
-        value = row.get(key)
-        if value is not None:
-            return value
-    return None
+    original = candidates[0] if candidates else None
+    if original is None:
+        return {
+            "fiscal_year": None,
+            "fiscal_quarter": None,
+            "period_start": None,
+            "form_type": None,
+        }
+
+    fiscal_quarter = original.get("fiscal_quarter")
+    form_type = original.get("form_type")
+
+    # fundamentals_raw solo contiene hechos de duración trimestral (70-110 días).
+    # Si el hecho trimestral procede del 10-K y SEC lo marca como FY, representa Q4.
+    if fiscal_quarter is None and form_type in {"10-K", "10-K/A"}:
+        fiscal_quarter = 4
+
+    return {
+        "fiscal_year": original.get("fiscal_year"),
+        "fiscal_quarter": fiscal_quarter,
+        "period_start": original.get("period_start"),
+        "form_type": form_type,
+    }
 
 
-def _quarterly_record(company_id, period_end, metric_rows):
-    rows = list(metric_rows.values())
+def _quarterly_record(company_id, period_end, all_period_rows):
+    metric_rows = _select_latest_metric_rows(all_period_rows)
+    fiscal = _original_fiscal_metadata(all_period_rows)
+
     latest_filed_date = max(
-        (row["filed_date"] for row in rows if row["filed_date"] is not None),
+        (row["filed_date"] for row in all_period_rows if row["filed_date"] is not None),
         default=None,
     )
 
@@ -311,12 +344,12 @@ def _quarterly_record(company_id, period_end, metric_rows):
 
     return {
         "company_id": company_id,
-        "fiscal_year": _latest_non_null(rows, "fiscal_year"),
-        "fiscal_quarter": _latest_non_null(rows, "fiscal_quarter"),
-        "period_start": _latest_non_null(rows, "period_start"),
+        "fiscal_year": fiscal["fiscal_year"],
+        "fiscal_quarter": fiscal["fiscal_quarter"],
+        "period_start": fiscal["period_start"],
         "period_end": period_end,
         "latest_filed_date": latest_filed_date,
-        "form_type": _latest_non_null(rows, "form_type"),
+        "form_type": fiscal["form_type"],
         "eps_diluted": eps["value"] if eps else None,
         "revenue": revenue["value"] if revenue else None,
         "net_income": net_income["value"] if net_income else None,
@@ -342,25 +375,30 @@ def _quarterly_record(company_id, period_end, metric_rows):
 
 def normalize_sec_quarterly(company_id):
     """
-    Normaliza fundamentals_raw de SEC a una fila por company_id + period_end.
+    Normaliza SEC a una fila por company_id + period_end.
 
-    Para cada métrica y period_end elige el hecho con filed_date más reciente;
-    si hay empate, usa el id más alto. Mantiene trazabilidad mediante *_raw_id.
+    - Valor de cada métrica: filing más reciente disponible.
+    - Identidad fiscal: filing original más antiguo del period_end.
+    - Hechos trimestrales de 10-K con FP=FY se etiquetan como Q4.
+    - Mantiene trazabilidad mediante *_raw_id.
     """
 
     with get_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(LATEST_SEC_RAW_SQL, (company_id,))
+            cur.execute(ALL_SEC_RAW_SQL, (company_id,))
             columns = [desc.name for desc in cur.description]
             raw_rows = [dict(zip(columns, row)) for row in cur.fetchall()]
 
             periods = {}
             for row in raw_rows:
-                periods.setdefault(row["period_end"], {})[row["metric"]] = row
+                periods.setdefault(row["period_end"], []).append(row)
 
             normalized_ids = []
+            raw_metric_periods = 0
             for period_end in sorted(periods):
-                record = _quarterly_record(company_id, period_end, periods[period_end])
+                period_rows = periods[period_end]
+                raw_metric_periods += len(_select_latest_metric_rows(period_rows))
+                record = _quarterly_record(company_id, period_end, period_rows)
                 cur.execute(
                     UPSERT_QUARTERLY_SQL,
                     (
@@ -397,7 +435,8 @@ def normalize_sec_quarterly(company_id):
 
     return {
         "company_id": company_id,
-        "raw_metric_periods": len(raw_rows),
+        "raw_facts_read": len(raw_rows),
+        "raw_metric_periods": raw_metric_periods,
         "quarters_normalized": len(normalized_ids),
         "quarterly_ids": normalized_ids,
         "normalizer_version": NORMALIZER_VERSION,
