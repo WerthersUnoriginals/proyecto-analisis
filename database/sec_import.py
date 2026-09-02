@@ -50,6 +50,8 @@ def _currency_from_unit(unit):
 
 
 def _rows_from_concept(concept: dict, metric: str, xbrl_tag: str, years: int):
+    """Devuelve todos los hechos trimestrales utilizables de un concepto SEC."""
+
     cutoff = (pd.Timestamp.now("UTC").tz_localize(None) - pd.DateOffset(years=years)).date()
     units = concept.get("units", {})
     unit = next((candidate for candidate in SEC_UNIT_PREFERENCE[metric] if candidate in units), None)
@@ -84,10 +86,15 @@ def _rows_from_concept(concept: dict, metric: str, xbrl_tag: str, years: int):
         )
 
     rows.sort(key=lambda row: (row["period_end"], row["filed_date"] or date.min))
-    latest_by_period = {}
-    for row in rows:
-        latest_by_period[row["period_end"]] = row
-    return list(latest_by_period.values())
+    return rows
+
+
+def _current_series_row_count(rows):
+    """Replica la selección actual: un dato por period_end, el último presentado."""
+
+    if not rows:
+        return 0
+    return len({row["period_end"] for row in rows})
 
 
 def _candidate_tags(facts: dict, metric: str):
@@ -121,6 +128,7 @@ def extract_sec_raw_facts(symbol: str, company_id: int, years: int = 6):
     for metric in SEC_TAG_CANDIDATES:
         best_rows = []
         best_tag = None
+        best_period_count = 0
 
         for tag in _candidate_tags(payload, metric):
             concept = payload.get("facts", {}).get("us-gaap", {}).get(tag)
@@ -128,23 +136,26 @@ def extract_sec_raw_facts(symbol: str, company_id: int, years: int = 6):
                 continue
 
             rows = _rows_from_concept(concept, metric, tag, years)
-            if len(rows) > len(best_rows):
+            period_count = _current_series_row_count(rows)
+            if period_count > best_period_count:
                 best_rows = rows
                 best_tag = tag
+                best_period_count = period_count
 
         if best_tag is None:
             continue
 
         selected_tags[metric] = best_tag
         for row in best_rows:
-            row.update(
+            fact = dict(row)
+            fact.update(
                 {
                     "company_id": company_id,
                     "source": "SEC",
                     "metric": metric,
                 }
             )
-            facts_to_store.append(row)
+            facts_to_store.append(fact)
 
     return {
         "ticker": ticker,
