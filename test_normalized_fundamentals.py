@@ -1,13 +1,18 @@
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
 from database.normalized_fundamentals import (
+    YAHOO_NORMALIZER_VERSION,
+    FiscalIdentityResult,
     NormalizedObservation,
     SEC_NORMALIZER_VERSION,
     _original_sec_fiscal_identity,
+    normalize_yahoo_raw_row,
     normalize_sec_raw_row,
+    resolve_yahoo_fiscal_identity,
     insert_normalized_batch,
     load_raw_fundamentals,
 )
@@ -39,6 +44,41 @@ def sec_row(**overrides):
     }
     row.update(overrides)
     return row
+
+
+def yahoo_row(**overrides):
+    row = {
+        "id": 409,
+        "company_id": 1,
+        "source": "YAHOO",
+        "source_variant": None,
+        "metric": "EPS_DILUTED",
+        "period_start": None,
+        "period_end": date(2025, 9, 30),
+        "filed_date": None,
+        "fiscal_year": None,
+        "fiscal_quarter": None,
+        "form_type": None,
+        "value": Decimal("1.85"),
+        "unit": "USD/shares",
+        "currency": "USD",
+        "xbrl_tag": None,
+        "source_record_id": "yahoo:abc",
+        "source_payload": {"source_available_at": None},
+        "fetched_at": datetime(2026, 9, 4, 19, 1, tzinfo=timezone.utc),
+        "created_at": datetime(2026, 9, 4, 19, 1, tzinfo=timezone.utc),
+    }
+    row.update(overrides)
+    return row
+
+
+def sec_observation(raw_id, fiscal_year, fiscal_quarter, period_end, **overrides):
+    overrides.setdefault("period_start", period_end - timedelta(days=90))
+    item = normalize_sec_raw_row(
+        sec_row(id=raw_id, period_end=period_end, **overrides),
+        {"fiscal_year": fiscal_year, "fiscal_quarter": fiscal_quarter},
+    )
+    return replace(item, id=raw_id + 1000)
 
 
 class ScriptedCursor:
@@ -251,6 +291,174 @@ class SecNormalizedTests(unittest.TestCase):
         fact = {**sec_row(), "fetched_at": fetched_at}
         self.assertEqual(_insert_raw_with_cursor(captured, fact), 101)
         self.assertEqual(captured.executed[0][1][-1], fetched_at)
+
+
+class YahooNormalizedTests(unittest.TestCase):
+    yahoo_variant = "yahoo.fundamentals_timeseries"
+
+    def test_unambiguous_q4_from_fiscal_bookends_keeps_yahoo_date(self):
+        calendar = [
+            sec_observation(301, 2025, 3, date(2025, 6, 28)),
+            sec_observation(302, 2026, 1, date(2025, 12, 27)),
+        ]
+        item = normalize_yahoo_raw_row(yahoo_row(), self.yahoo_variant, calendar)
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (2025, 4))
+        self.assertEqual(item.canonical_period_end, date(2025, 9, 30))
+        self.assertEqual(item.source_period_end, date(2025, 9, 30))
+        self.assertEqual(item.series_date, date(2025, 9, 30))
+        self.assertEqual(item.alignment_method, "SEC_CALENDAR")
+        self.assertEqual(item.selection_eligibility, "ELIGIBLE")
+
+    def test_correlated_calendar_resolves_direct_period_and_records_alignment(self):
+        calendar = [
+            sec_observation(310, 2025, 2, date(2025, 3, 29)),
+            sec_observation(311, 2025, 3, date(2025, 6, 28)),
+        ]
+        item = normalize_yahoo_raw_row(
+            yahoo_row(period_end=date(2025, 6, 30)), self.yahoo_variant, calendar
+        )
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (2025, 3))
+        self.assertEqual(item.canonical_period_end, date(2025, 6, 28))
+        self.assertEqual(item.alignment_method, "NEAREST_35D")
+        self.assertEqual(item.alignment_days, 2)
+        self.assertEqual(item.alignment_reference_id, 1311)
+
+    def test_near_corroborated_period_wins_over_a_later_calendar_gap(self):
+        calendar = [
+            sec_observation(312, 2025, 2, date(2025, 3, 29)),
+            sec_observation(313, 2025, 3, date(2025, 6, 28)),
+            sec_observation(314, 2026, 1, date(2025, 12, 27)),
+        ]
+        item = normalize_yahoo_raw_row(
+            yahoo_row(period_end=date(2025, 6, 30)), self.yahoo_variant, calendar
+        )
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (2025, 3))
+        self.assertEqual(item.alignment_reference_id, 1313)
+        self.assertEqual(item.alignment_method, "NEAREST_35D")
+
+    def test_single_nearby_sec_is_not_enough_to_assign_fiscal_identity(self):
+        calendar = [sec_observation(320, 2025, 4, date(2025, 9, 19))]
+        item = normalize_yahoo_raw_row(
+            yahoo_row(period_end=date(2025, 8, 15)), self.yahoo_variant, calendar
+        )
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (None, None))
+        self.assertIsNone(item.canonical_period_end)
+        self.assertEqual(item.alignment_method, "UNRESOLVED")
+        self.assertEqual(item.selection_eligibility, "INELIGIBLE")
+        self.assertEqual(item.intrinsic_quality_status, "REVIEW_REQUIRED")
+        self.assertIn("PROXIMITY_WITHOUT_FISCAL_IDENTITY_V1", item.intrinsic_quality_reasons)
+
+    def test_fiscal_neighbor_on_the_wrong_side_does_not_corroborate_identity(self):
+        calendar = [
+            sec_observation(321, 2025, 3, date(2025, 6, 28)),
+            sec_observation(322, 2025, 2, date(2025, 9, 27)),
+        ]
+        item = normalize_yahoo_raw_row(
+            yahoo_row(period_end=date(2025, 6, 30)), self.yahoo_variant, calendar
+        )
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (None, None))
+        self.assertEqual(item.alignment_method, "UNRESOLVED")
+
+    def test_tied_sec_candidates_remain_ambiguous(self):
+        calendar = [
+            sec_observation(330, 2025, 3, date(2025, 7, 11)),
+            sec_observation(331, 2025, 4, date(2025, 9, 19)),
+        ]
+        result = resolve_yahoo_fiscal_identity(
+            yahoo_row(period_end=date(2025, 8, 15)), calendar
+        )
+
+        self.assertIsInstance(result, FiscalIdentityResult)
+        self.assertEqual((result.fiscal_year, result.fiscal_quarter), (None, None))
+        self.assertIn("AMBIGUOUS_FISCAL_IDENTITY_V1", result.reasons)
+
+    def test_fiscal_contradiction_is_not_resolved_by_proximity(self):
+        row = yahoo_row(
+            period_end=date(2025, 9, 30), fiscal_year=2025, fiscal_quarter=4
+        )
+        calendar = [sec_observation(340, 2026, 1, date(2025, 9, 29))]
+        item = normalize_yahoo_raw_row(row, self.yahoo_variant, calendar)
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (None, None))
+        self.assertIsNone(item.canonical_period_end)
+        self.assertIn("CONTRADICTORY_FISCAL_IDENTITY_V1", item.intrinsic_quality_reasons)
+
+    def test_irregular_calendar_can_infer_the_only_missing_fiscal_quarter(self):
+        calendar = [
+            sec_observation(350, 2025, 3, date(2025, 6, 7)),
+            sec_observation(351, 2026, 1, date(2026, 1, 17)),
+        ]
+        item = normalize_yahoo_raw_row(
+            yahoo_row(period_end=date(2025, 10, 5)), self.yahoo_variant, calendar
+        )
+
+        self.assertEqual((item.fiscal_year, item.fiscal_quarter), (2025, 4))
+        self.assertEqual(item.alignment_method, "SEC_CALENDAR")
+
+    def test_alignment_limit_is_inclusive_at_35_and_excludes_36(self):
+        calendar = [
+            sec_observation(360, 2025, 2, date(2025, 3, 29)),
+            sec_observation(361, 2025, 3, date(2025, 6, 28)),
+        ]
+        at_35 = normalize_yahoo_raw_row(
+            yahoo_row(
+                period_end=date(2025, 8, 2), fiscal_year=2025, fiscal_quarter=3
+            ),
+            self.yahoo_variant,
+            calendar,
+        )
+        at_36 = normalize_yahoo_raw_row(
+            yahoo_row(
+                id=410,
+                period_end=date(2025, 8, 3),
+                fiscal_year=2025,
+                fiscal_quarter=3,
+            ),
+            self.yahoo_variant,
+            calendar,
+        )
+
+        self.assertEqual((at_35.alignment_method, at_35.alignment_days), ("NEAREST_35D", 35))
+        self.assertEqual(at_35.alignment_reference_id, 1361)
+        self.assertEqual((at_36.alignment_method, at_36.alignment_days), ("FISCAL_METADATA", 0))
+        self.assertIsNone(at_36.alignment_reference_id)
+
+    def test_yahoo_contract_preserves_variant_dates_availability_and_reported_kind(self):
+        calendar = [
+            sec_observation(370, 2025, 3, date(2025, 6, 28)),
+            sec_observation(371, 2026, 1, date(2025, 12, 27)),
+        ]
+        for variant in (
+            "yahoo.fundamentals_timeseries",
+            "yfinance.quarterly_income_stmt",
+        ):
+            with self.subTest(variant=variant):
+                item = normalize_yahoo_raw_row(yahoo_row(), variant, calendar)
+                self.assertEqual(item.source_variant, variant)
+                self.assertEqual(item.source_period_end, date(2025, 9, 30))
+                self.assertEqual(item.series_date, date(2025, 9, 30))
+                self.assertIsNone(item.source_available_at)
+                self.assertEqual(item.observation_kind, "REPORTED")
+                self.assertNotEqual(item.source, "DERIVED")
+                self.assertEqual(item.normalizer_version, YAHOO_NORMALIZER_VERSION)
+
+    def test_repeated_yahoo_raw_and_version_return_same_normalized_id(self):
+        calendar = [
+            sec_observation(380, 2025, 3, date(2025, 6, 28)),
+            sec_observation(381, 2026, 1, date(2025, 12, 27)),
+        ]
+        item = normalize_yahoo_raw_row(yahoo_row(), self.yahoo_variant, calendar)
+        cursor = ScriptedCursor([(201,), None, (201, *item_to_db_row(item))])
+        with patch(
+            "database.normalized_fundamentals.get_connection",
+            return_value=ScriptedConnection(cursor),
+        ):
+            self.assertEqual(insert_normalized_batch([item, item]), [201, 201])
 
 
 def item_to_db_row(item):

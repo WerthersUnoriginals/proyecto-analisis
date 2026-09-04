@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Iterable
+from typing import Iterable, Sequence
 
 try:
     from psycopg.types.json import Jsonb
@@ -26,6 +26,7 @@ def get_connection():
 
 SEC_VARIANT = "sec.company_facts"
 SEC_NORMALIZER_VERSION = "sec-normalized-v1"
+YAHOO_NORMALIZER_VERSION = "yahoo-normalized-v1"
 
 _METRIC_UNITS = {
     "EPS_DILUTED": "USD/shares",
@@ -66,6 +67,7 @@ class NormalizedObservation:
     alignment_method: str
     alignment_days: int | None
     alignment_reference_id: int | None
+    id: int | None = None
 
     def __post_init__(self):
         if self.metric not in _METRIC_UNITS:
@@ -127,6 +129,17 @@ class NormalizedObservation:
             or self.selection_eligibility != "INELIGIBLE"
         ):
             raise ValueError("UNRESOLVED requiere revisión e inelegibilidad")
+
+
+@dataclass(frozen=True)
+class FiscalIdentityResult:
+    fiscal_year: int | None
+    fiscal_quarter: int | None
+    canonical_period_end: date | None
+    alignment_method: str
+    alignment_days: int | None
+    alignment_reference_id: int | None
+    reasons: tuple[str, ...] = ()
 
 
 _NORMALIZED_COLUMNS = (
@@ -255,6 +268,207 @@ def normalize_sec_raw_row(row: dict, fiscal_identity: dict) -> NormalizedObserva
         alignment_method="EXACT",
         alignment_days=0,
         alignment_reference_id=None,
+    )
+
+
+def _fiscal_index(fiscal_year: int, fiscal_quarter: int) -> int:
+    return fiscal_year * 4 + fiscal_quarter - 1
+
+
+def _fiscal_identity(index: int) -> tuple[int, int]:
+    return index // 4, index % 4 + 1
+
+
+def _yahoo_calendar_rows(
+    row: dict, sec_calendar: Sequence[NormalizedObservation]
+) -> list[NormalizedObservation]:
+    unique = {}
+    for item in sec_calendar:
+        if (
+            item.source != "SEC"
+            or item.company_id != row["company_id"]
+            or item.metric != row["metric"]
+            or item.fiscal_year is None
+            or item.fiscal_quarter is None
+            or item.canonical_period_end is None
+        ):
+            continue
+        key = (item.fiscal_year, item.fiscal_quarter, item.canonical_period_end)
+        current = unique.get(key)
+        if current is None or item.raw_id < current.raw_id:
+            unique[key] = item
+    return sorted(unique.values(), key=lambda item: (item.canonical_period_end, item.raw_id))
+
+
+def _unresolved_yahoo_identity(*reasons: str) -> FiscalIdentityResult:
+    return FiscalIdentityResult(
+        fiscal_year=None,
+        fiscal_quarter=None,
+        canonical_period_end=None,
+        alignment_method="UNRESOLVED",
+        alignment_days=None,
+        alignment_reference_id=None,
+        reasons=tuple(reasons) or ("YAHOO_FISCAL_IDENTITY_UNRESOLVED_V1",),
+    )
+
+
+def resolve_yahoo_fiscal_identity(
+    row: dict, sec_calendar: Sequence[NormalizedObservation]
+) -> FiscalIdentityResult:
+    """Resuelve identidad fiscal sin tratar la proximidad como evidencia suficiente."""
+
+    source_date = row["period_end"]
+    calendar = _yahoo_calendar_rows(row, sec_calendar)
+    metadata = (row.get("fiscal_year"), row.get("fiscal_quarter"))
+    if (metadata[0] is None) != (metadata[1] is None):
+        return _unresolved_yahoo_identity("INCOMPLETE_FISCAL_METADATA_V1")
+
+    nearby = [
+        item for item in calendar
+        if abs((source_date - item.canonical_period_end).days) <= 35
+    ]
+    reference = None
+    tied = False
+    if nearby:
+        nearest_distance = min(abs((source_date - item.canonical_period_end).days) for item in nearby)
+        nearest = [
+            item for item in nearby
+            if abs((source_date - item.canonical_period_end).days) == nearest_distance
+        ]
+        nearest_identities = {
+            (item.fiscal_year, item.fiscal_quarter, item.canonical_period_end)
+            for item in nearest
+        }
+        tied = len(nearest_identities) > 1
+        if not tied:
+            reference = min(nearest, key=lambda item: item.raw_id)
+
+    if tied:
+        return _unresolved_yahoo_identity("AMBIGUOUS_FISCAL_IDENTITY_V1")
+
+    before = [item for item in calendar if item.canonical_period_end < source_date]
+    after = [item for item in calendar if item.canonical_period_end > source_date]
+    inferred = None
+    if reference is None and before and after:
+        previous_date = max(item.canonical_period_end for item in before)
+        next_date = min(item.canonical_period_end for item in after)
+        previous = [item for item in before if item.canonical_period_end == previous_date]
+        following = [item for item in after if item.canonical_period_end == next_date]
+        previous_identities = {(item.fiscal_year, item.fiscal_quarter) for item in previous}
+        following_identities = {(item.fiscal_year, item.fiscal_quarter) for item in following}
+        if len(previous_identities) == 1 and len(following_identities) == 1:
+            previous_identity = next(iter(previous_identities))
+            following_identity = next(iter(following_identities))
+            previous_index = _fiscal_index(*previous_identity)
+            following_index = _fiscal_index(*following_identity)
+            if following_index - previous_index == 2:
+                inferred = _fiscal_identity(previous_index + 1)
+
+    identity = metadata if metadata[0] is not None else None
+    identity_method = "FISCAL_METADATA" if identity is not None else None
+    if identity is None and inferred is not None:
+        identity = inferred
+        identity_method = "SEC_CALENDAR"
+
+    if identity is None and reference is not None:
+        reference_index = _fiscal_index(reference.fiscal_year, reference.fiscal_quarter)
+        corroborated = False
+        for item in calendar:
+            if item.raw_id == reference.raw_id:
+                continue
+            fiscal_delta = _fiscal_index(item.fiscal_year, item.fiscal_quarter) - reference_index
+            date_delta = (item.canonical_period_end - reference.canonical_period_end).days
+            if (fiscal_delta == 1 and date_delta > 0) or (fiscal_delta == -1 and date_delta < 0):
+                corroborated = True
+                break
+        if corroborated:
+            identity = (reference.fiscal_year, reference.fiscal_quarter)
+
+    if identity is None:
+        reason = (
+            "PROXIMITY_WITHOUT_FISCAL_IDENTITY_V1"
+            if reference is not None
+            else "YAHOO_FISCAL_IDENTITY_UNRESOLVED_V1"
+        )
+        return _unresolved_yahoo_identity(reason)
+
+    if reference is not None and identity != (reference.fiscal_year, reference.fiscal_quarter):
+        return _unresolved_yahoo_identity("CONTRADICTORY_FISCAL_IDENTITY_V1")
+
+    if reference is not None:
+        alignment_days = (source_date - reference.canonical_period_end).days
+        return FiscalIdentityResult(
+            fiscal_year=identity[0],
+            fiscal_quarter=identity[1],
+            canonical_period_end=reference.canonical_period_end,
+            alignment_method="EXACT" if alignment_days == 0 else "NEAREST_35D",
+            alignment_days=alignment_days,
+            alignment_reference_id=reference.id,
+        )
+
+    return FiscalIdentityResult(
+        fiscal_year=identity[0],
+        fiscal_quarter=identity[1],
+        canonical_period_end=source_date,
+        alignment_method=identity_method or "SEC_CALENDAR",
+        alignment_days=0,
+        alignment_reference_id=None,
+    )
+
+
+def normalize_yahoo_raw_row(
+    row: dict,
+    source_variant: str,
+    sec_calendar: Sequence[NormalizedObservation],
+) -> NormalizedObservation:
+    """Normaliza Yahoo conservando sus fechas y sin seleccionar una fuente efectiva."""
+
+    if row.get("source") != "YAHOO":
+        raise ValueError("normalize_yahoo_raw_row sólo acepta evidencia YAHOO")
+    if not (
+        source_variant.startswith("yahoo.")
+        or source_variant.startswith("yfinance.")
+    ):
+        raise ValueError("source_variant Yahoo no admitida")
+    observed_at = row.get("fetched_at")
+    if not isinstance(observed_at, datetime):
+        raise ValueError("Una fila raw Yahoo requiere fetched_at para observed_at")
+
+    payload = row.get("source_payload") or {}
+    payload_variant = payload.get("source_variant")
+    if payload_variant is not None and payload_variant != source_variant:
+        raise ValueError("source_variant Yahoo contradice el payload raw")
+
+    identity = resolve_yahoo_fiscal_identity(row, sec_calendar)
+    quality = "OK" if not identity.reasons else "REVIEW_REQUIRED"
+    eligibility = "ELIGIBLE" if quality == "OK" else "INELIGIBLE"
+    period_end = row["period_end"]
+    return NormalizedObservation(
+        company_id=row["company_id"],
+        metric=row["metric"],
+        source="YAHOO",
+        source_variant=source_variant,
+        observation_kind="REPORTED",
+        value=Decimal(str(row["value"])),
+        unit=row["unit"],
+        currency=row.get("currency"),
+        source_period_start=row.get("period_start"),
+        source_period_end=period_end,
+        canonical_period_end=identity.canonical_period_end,
+        series_date=period_end,
+        fiscal_year=identity.fiscal_year,
+        fiscal_quarter=identity.fiscal_quarter,
+        filed_date=None,
+        source_available_at=None,
+        observed_at=observed_at,
+        raw_id=row["id"],
+        normalizer_version=YAHOO_NORMALIZER_VERSION,
+        intrinsic_quality_status=quality,
+        intrinsic_quality_reasons=identity.reasons,
+        selection_eligibility=eligibility,
+        alignment_method=identity.alignment_method,
+        alignment_days=identity.alignment_days,
+        alignment_reference_id=identity.alignment_reference_id,
     )
 
 
