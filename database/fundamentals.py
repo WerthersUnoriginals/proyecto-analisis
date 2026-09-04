@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 
 from psycopg.types.json import Jsonb
 
@@ -21,12 +21,14 @@ INSERT_RAW_SQL = """
         currency,
         xbrl_tag,
         source_record_id,
-        source_payload
+        source_payload,
+        fetched_at
     )
     VALUES (
         %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s,
-        %s, %s, %s, %s, %s
+        %s, %s, %s, %s, %s,
+        %s
     )
     ON CONFLICT DO NOTHING
     RETURNING id;
@@ -159,6 +161,7 @@ def _insert_raw_with_cursor(cur, fact):
             fact.get("xbrl_tag"),
             fact.get("source_record_id"),
             _payload_value(fact.get("source_payload")),
+            fact.get("fetched_at") or datetime.now(timezone.utc),
         ),
     )
 
@@ -200,6 +203,7 @@ def insert_raw_fundamental(
     xbrl_tag=None,
     source_record_id=None,
     source_payload=None,
+    fetched_at=None,
 ):
     """Guarda un hecho fundamental bruto y devuelve su id."""
 
@@ -219,6 +223,7 @@ def insert_raw_fundamental(
         "xbrl_tag": xbrl_tag,
         "source_record_id": source_record_id,
         "source_payload": source_payload,
+        "fetched_at": fetched_at,
     }
 
     with get_connection() as conn:

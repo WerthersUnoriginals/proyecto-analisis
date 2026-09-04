@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import requests
 
 from database.fundamentals import insert_raw_fundamentals_batch
+from database.normalized_fundamentals import SEC_VARIANT
 from fundamental_c import (
     SEC_COMPANYFACTS_URL,
     SEC_HEADERS,
@@ -170,6 +171,10 @@ def import_sec_fundamentals(symbol: str, company_id: int, years: int = 6):
     """Descarga hechos SEC y los persiste en fundamentals_raw."""
 
     result = extract_sec_raw_facts(symbol, company_id, years=years)
+    fetched_at = datetime.now(timezone.utc)
+    for fact in result["facts"]:
+        fact["fetched_at"] = fetched_at
+        fact["source_variant"] = SEC_VARIANT
     ids = insert_raw_fundamentals_batch(result["facts"])
     return {
         "ticker": result["ticker"],
