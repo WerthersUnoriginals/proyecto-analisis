@@ -6,15 +6,28 @@ híbrida replica la alineación de Yahoo a +/-35 días de ``fundamental_c.py``.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import argparse
 import math
-import sys
+from collections import defaultdict
 from datetime import date
 from typing import Iterable, Optional
 
 
 METRICS = ("EPS_DILUTED", "REVENUE", "NET_INCOME", "DILUTED_SHARES")
 HYBRID_METRICS = ("EPS_DILUTED", "REVENUE", "NET_INCOME")
+SEC_NORMALIZER_VERSION = "sec-normalized-v1"
+SEC_EFFECTIVE_EXPECTED_COUNTS = {
+    "EPS_DILUTED": 19,
+    "REVENUE": 19,
+    "NET_INCOME": 19,
+    "DILUTED_SHARES": 18,
+}
 EPS_ABS_TOLERANCE = 1e-8
 EPS_REL_TOLERANCE = 1e-7
 LARGE_VALUE_ABS_TOLERANCE = 0.01
@@ -319,6 +332,45 @@ def load_postgres_records(ticker: str):
     return records
 
 
+def _get_connection():
+    """Importa PostgreSQL sólo para los lectores que lo necesitan."""
+
+    from database.db import get_connection
+
+    return get_connection()
+
+
+def load_normalized_sec_records(ticker: str):
+    """Lee evidencia normalizada SEC para la puerta efectiva, sin persistir nada."""
+
+    query = """
+        SELECT
+            fn.metric,
+            fn.source,
+            fn.source_variant,
+            fn.observation_kind,
+            fn.selection_eligibility,
+            fn.normalizer_version,
+            fn.source_period_end,
+            fn.value,
+            fn.fiscal_year,
+            fn.fiscal_quarter,
+            fn.filed_date,
+            fn.raw_id,
+            raw.xbrl_tag
+        FROM fundamentals_normalized AS fn
+        JOIN companies AS c ON c.id = fn.company_id
+        JOIN fundamentals_raw AS raw ON raw.id = fn.raw_id
+        WHERE c.ticker = %s
+        ORDER BY fn.metric, fn.source_period_end, fn.filed_date, fn.raw_id
+    """
+    with _get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query, (ticker,))
+            columns = [description.name for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
 def _nearest_period(records, target: date, days: int):
     candidates = [(abs((item["period"] - target).days), item) for item in records]
     candidates = [candidate for candidate in candidates if candidate[0] <= days]
@@ -531,6 +583,89 @@ def reproduced_count(rows):
     )
 
 
+def effective_sec_metric_period_gate(
+    records, code_data=None, normalizer_version=SEC_NORMALIZER_VERSION,
+):
+    """Proyecta SEC por periodo tras resolver el filing más reciente.
+
+    La puerta mide observaciones seleccionables por métrica-periodo; no cuenta
+    filas append-only de ``fundamentals_normalized`` ni fabrica valores DERIVED.
+    """
+
+    candidates = defaultdict(list)
+    for record in records:
+        if not (
+            record.get("metric") in METRICS
+            and record.get("source") == "SEC"
+            and record.get("source_variant") == "sec.company_facts"
+            and record.get("observation_kind") == "REPORTED"
+            and record.get("selection_eligibility") == "ELIGIBLE"
+            and record.get("normalizer_version") == normalizer_version
+        ):
+            continue
+        candidates[(record["metric"], record["source_period_end"])].append(record)
+
+    selected_by_metric = {metric: [] for metric in METRICS}
+    for (metric, _), filings in candidates.items():
+        selected_by_metric[metric].append(
+            max(filings, key=lambda row: (row.get("filed_date") or date.min, row["raw_id"]))
+        )
+    for rows in selected_by_metric.values():
+        rows.sort(key=lambda row: row["source_period_end"])
+
+    effective_counts = {metric: len(selected_by_metric[metric]) for metric in METRICS}
+    result = {
+        "effective_counts": effective_counts,
+        "effective_total": sum(effective_counts.values()),
+        "expected_counts": dict(SEC_EFFECTIVE_EXPECTED_COUNTS),
+        "cardinality_passed": effective_counts == SEC_EFFECTIVE_EXPECTED_COUNTS,
+        "selected_by_metric": selected_by_metric,
+    }
+    if code_data is None:
+        return result
+
+    numeric_rows = {}
+    reproduced_counts = {}
+    denominators = {}
+    for metric in METRICS:
+        code_records = _series_records(
+            code_data["sec"][metric], "SEC", code_data["sec_tags"].get(metric),
+        )
+        normalized_records = [
+            {
+                "period": record["source_period_end"],
+                "value": record["value"],
+                "source": "SEC",
+                "tag": record.get("xbrl_tag"),
+                "filed_date": record.get("filed_date"),
+                "raw_id": record["raw_id"],
+                "fiscal_year": record.get("fiscal_year"),
+                "fiscal_quarter": record.get("fiscal_quarter"),
+            }
+            for record in selected_by_metric[metric]
+        ]
+        rows = compare_sec_records(metric, code_records, normalized_records)
+        numeric_rows[metric] = rows
+        reproduced_counts[metric] = reproduced_count(rows)
+        denominators[metric] = comparison_summary(rows)["code"]
+
+    reproduced_total = sum(reproduced_counts.values())
+    denominator_total = sum(denominators.values())
+    result.update(
+        numeric_rows=numeric_rows,
+        reproduced_counts=reproduced_counts,
+        denominators=denominators,
+        reproduced_total=reproduced_total,
+        denominator_total=denominator_total,
+        passed=(
+            result["cardinality_passed"]
+            and reproduced_counts == SEC_EFFECTIVE_EXPECTED_COUNTS
+            and denominators == SEC_EFFECTIVE_EXPECTED_COUNTS
+        ),
+    )
+    return result
+
+
 def q4_coverage(code_data, postgres):
     rows = []
     for fiscal_year in range(2020, 2026):
@@ -717,6 +852,16 @@ def run_validation(ticker: str):
     q4_rows = result["q4"]
     inputs = result["inputs"]
     report = result["report"]
+    try:
+        normalized_gate = effective_sec_metric_period_gate(
+            load_normalized_sec_records(ticker), code_data=code_data,
+        )
+    except ModuleNotFoundError as error:
+        # Conserva el diagnóstico legacy utilizable en entornos sin el driver;
+        # una base real mal configurada sigue propagando su error.
+        if error.name not in {"psycopg", "dotenv"}:
+            raise
+        normalized_gate = None
 
     print(f"VALIDACIÓN FUNDAMENTALS {ticker}")
     print(f"CIK: {report.get('cik')} ({report.get('cik_source')})")
@@ -769,6 +914,19 @@ def run_validation(ticker: str):
     print(f"SEC GLOBAL: {sec_numerator}/{sec_denominator} ({100 * sec_numerator / sec_denominator:.1f}%)")
     print(f"HYBRID GLOBAL: {hybrid_numerator}/{hybrid_denominator} ({100 * hybrid_numerator / hybrid_denominator:.1f}%)")
     print(f"C INPUTS: {input_exact}/{len(inputs)} grupos reproducibles desde PostgreSQL")
+    if normalized_gate is not None:
+        print("\nSEC NORMALIZED EFFECTIVE METRIC-PERIOD")
+        for metric in METRICS:
+            print(
+                f"{metric}: {normalized_gate['reproduced_counts'][metric]}/"
+                f"{normalized_gate['denominators'][metric]}"
+            )
+        print(
+            "SEC_NORMALIZED_EFFECTIVE_METRIC_PERIOD="
+            f"{normalized_gate['reproduced_total']}/"
+            f"{normalized_gate['denominator_total']} "
+            f"{'PASS' if normalized_gate['passed'] else 'FAIL'}"
+        )
 
     return result
 
