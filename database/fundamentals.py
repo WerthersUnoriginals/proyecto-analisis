@@ -143,6 +143,24 @@ def _payload_value(source_payload):
 
 
 def _insert_raw_with_cursor(cur, fact):
+    source_record_id = fact.get("source_record_id")
+    if fact["source"] == "YAHOO" and source_record_id is not None:
+        cur.execute(
+            FIND_RAW_SQL,
+            (
+                fact["company_id"],
+                fact["source"],
+                fact["metric"],
+                fact["period_end"],
+                fact.get("xbrl_tag"),
+                fact.get("filed_date"),
+                source_record_id,
+            ),
+        )
+        existing = cur.fetchone()
+        if existing is not None:
+            return existing[0]
+
     cur.execute(
         INSERT_RAW_SQL,
         (
@@ -159,7 +177,7 @@ def _insert_raw_with_cursor(cur, fact):
             fact.get("unit"),
             fact.get("currency"),
             fact.get("xbrl_tag"),
-            fact.get("source_record_id"),
+            source_record_id,
             _payload_value(fact.get("source_payload")),
             fact.get("fetched_at") or datetime.now(timezone.utc),
         ),
