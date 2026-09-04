@@ -62,6 +62,7 @@ def _comparison_row(metric, code=None, postgres=None, status=None):
     return {
         "metric": metric,
         "source_code": code.get("source") if code else None,
+        "source_variant_code": code.get("source_variant") if code else None,
         "period_code": code.get("period") if code else None,
         "value_code": code_value,
         "tag_code": code.get("tag") if code else None,
@@ -146,14 +147,40 @@ def _series_records(series, source: str, tag=None):
     ]
 
 
-def _hybrid_records(sec_series, yahoo_series, tag=None):
-    from fundamental_c import _same_quarter_match
-
+def _hybrid_records(sec_series, yahoo_series, tag=None, yahoo_variants=None):
+    yahoo_variants = yahoo_variants or {}
     records = _series_records(sec_series, "SEC", tag)
     for item_date, value in yahoo_series.dropna().sort_index().items():
-        if _same_quarter_match(sec_series, item_date, HYBRID_DATE_TOLERANCE_DAYS) is None:
-            records.append({"period": item_date.date(), "value": float(value), "source": "YAHOO", "tag": None})
+        if not any(
+            abs((existing_date - item_date).days) <= HYBRID_DATE_TOLERANCE_DAYS
+            for existing_date in sec_series.dropna().index
+        ):
+            records.append(
+                {
+                    "period": item_date.date(),
+                    "value": float(value),
+                    "source": "YAHOO",
+                    "source_variant": yahoo_variants.get(item_date),
+                    "tag": None,
+                }
+            )
     return sorted(records, key=lambda item: item["period"])
+
+
+def _yahoo_source_variants(primary, fallback):
+    """Atribuye la subfuente antes del merge, usando las dos series disponibles."""
+
+    variants = {
+        item_date: "yahoo.fundamentals_timeseries"
+        for item_date in primary.dropna().sort_index().index
+    }
+    for item_date in fallback.dropna().sort_index().index:
+        if not any(
+            abs((existing_date - item_date).days) <= HYBRID_DATE_TOLERANCE_DAYS
+            for existing_date in primary.dropna().index
+        ):
+            variants[item_date] = "yfinance.quarterly_income_stmt"
+    return variants
 
 
 def load_code_series(ticker: str):
@@ -194,9 +221,17 @@ def load_code_series(ticker: str):
     yahoo_ts, yahoo_error = _fetch_yahoo_timeseries(ticker, list(yahoo_types.values()), years=5)
     if yahoo_error:
         errors["yahoo_timeseries"] = yahoo_error
-    yahoo = {
-        metric: _merge_primary_with_fallback(yahoo_ts.get(series_type, pd.Series(dtype="float64")), yf_series[metric])
+    yahoo_primary = {
+        metric: yahoo_ts.get(series_type, pd.Series(dtype="float64"))
         for metric, series_type in yahoo_types.items()
+    }
+    yahoo = {
+        metric: _merge_primary_with_fallback(yahoo_primary[metric], yf_series[metric])
+        for metric in yahoo_types
+    }
+    yahoo_variants = {
+        metric: _yahoo_source_variants(yahoo_primary[metric], yf_series[metric])
+        for metric in yahoo_types
     }
 
     sec_data, sec_tags, cik, cik_source, sec_error = _fetch_sec_companyfacts(ticker, stock=stock, years=6)
@@ -204,7 +239,9 @@ def load_code_series(ticker: str):
         errors["sec"] = sec_error
     sec = {metric: sec_data.get(metric, pd.Series(dtype="float64")) for metric in METRICS}
     hybrid = {
-        metric: _hybrid_records(sec[metric], yahoo[metric], sec_tags.get(metric))
+        metric: _hybrid_records(
+            sec[metric], yahoo[metric], sec_tags.get(metric), yahoo_variants[metric]
+        )
         for metric in HYBRID_METRICS
     }
     return {
@@ -214,6 +251,7 @@ def load_code_series(ticker: str):
         "sec": sec,
         "sec_tags": sec_tags,
         "yahoo": yahoo,
+        "yahoo_variants": yahoo_variants,
         "hybrid": hybrid,
         "errors": errors,
     }
@@ -598,10 +636,37 @@ def _print_rows(title, rows):
         ))
 
 
-def run_validation(ticker: str):
+def load_validation_snapshot(ticker: str):
+    """Agrupa una adquisición lógica de las dos vistas legacy y PostgreSQL.
+
+    No intenta imponer atomicidad entre proveedores externos: conserva juntos
+    los resultados de una llamada a cada camino legacy actual para que el
+    constructor y el reporte consuman el mismo snapshot coordinado.
+    """
+
     ticker = ticker.upper().strip()
     code_data = load_code_series(ticker)
     postgres = load_postgres_records(ticker)
+    from fundamental_c import analyze_current_earnings
+
+    return {
+        "code_data": code_data,
+        "postgres": postgres,
+        "report": analyze_current_earnings(ticker),
+    }
+
+
+def build_validation_result(ticker: str, code_data=None, postgres=None, report=None):
+    """Construye las puertas de regresión sin modificar los cálculos existentes."""
+
+    ticker = ticker.upper().strip()
+    if code_data is None and postgres is None and report is None:
+        snapshot = load_validation_snapshot(ticker)
+        code_data = snapshot["code_data"]
+        postgres = snapshot["postgres"]
+        report = snapshot["report"]
+    elif code_data is None or postgres is None:
+        raise ValueError("build_validation_result requiere code_data y postgres explícitos juntos.")
     sec_rows = {}
     hybrid_rows = {}
     for metric in METRICS:
@@ -610,23 +675,65 @@ def run_validation(ticker: str):
     for metric in HYBRID_METRICS:
         hybrid_rows[metric] = compare_hybrid_records(metric, code_data["hybrid"][metric], postgres[metric])
 
+    report = report if report is not None else code_data.get("report")
+    if report is None:
+        raise ValueError("build_validation_result requiere un report del mismo snapshot.")
+    report_subset = {
+        key: report.get(key)
+        for key in (
+            "ticker", "version", "data_source", "cik", "cik_source", "sec_tags",
+            "latest_eps", "latest_eps_source", "latest_eps_yoy_pct", "previous_eps_yoy_pct",
+            "eps_acceleration_pp", "latest_revenue", "latest_revenue_yoy_pct",
+            "previous_revenue_yoy_pct", "revenue_acceleration_pp", "eps_loss_to_profit",
+            "quarters_eps_available", "quarters_revenue_available", "eps_yoy_calculable",
+            "revenue_yoy_calculable", "sec_eps_quarters", "sec_revenue_quarters",
+            "sec_diluted_shares_quarters", "shares_quality", "yahoo_eps_quarters",
+            "yahoo_revenue_quarters", "split_integrity_status", "data_quality", "data_integrity",
+        )
+        if key in report
+    }
+    return {
+        "sec": sec_rows,
+        "hybrid": hybrid_rows,
+        "q4": q4_coverage(code_data, postgres),
+        "inputs": c_score_inputs(code_data, postgres),
+        "report": report_subset,
+        "c_score": report["c_score_v1"],
+    }
+
+
+def run_validation(ticker: str):
+    ticker = ticker.upper().strip()
+    snapshot = load_validation_snapshot(ticker)
+    code_data = snapshot["code_data"]
+    result = build_validation_result(
+        ticker,
+        code_data=code_data,
+        postgres=snapshot["postgres"],
+        report=snapshot["report"],
+    )
+    sec_rows = result["sec"]
+    hybrid_rows = result["hybrid"]
+    q4_rows = result["q4"]
+    inputs = result["inputs"]
+    report = result["report"]
+
     print(f"VALIDACIÓN FUNDAMENTALS {ticker}")
-    print(f"CIK: {code_data['cik']} ({code_data['cik_source']})")
+    print(f"CIK: {report.get('cik')} ({report.get('cik_source')})")
     print(
         "Tolerancias: EPS abs<=1e-8 o rel<=1e-7; valores grandes "
         "abs<=0.01 o rel<=1e-10; Yahoo fecha<=35 días."
     )
-    if code_data["errors"]:
-        print(f"Errores/fallbacks de fuentes: {code_data['errors']}")
-
+    errors = code_data.get("errors", {})
+    if errors:
+        print(f"Errores/fallbacks de fuentes: {errors}")
     for metric in METRICS:
-        _print_rows(f"SEC VS POSTGRESQL — {metric} — tag código: {code_data['sec_tags'].get(metric)}", sec_rows[metric])
+        _print_rows(f"SEC VS POSTGRESQL — {metric} — tag código: {report.get('sec_tags', {}).get(metric)}", sec_rows[metric])
         print(f"Resumen: {comparison_summary(sec_rows[metric])}")
     for metric in HYBRID_METRICS:
         _print_rows(f"HÍBRIDO VS POSTGRESQL — {metric}", hybrid_rows[metric])
         print(f"Resumen: {comparison_summary(hybrid_rows[metric])}")
 
-    q4_rows = q4_coverage(code_data, postgres)
     print("\nQ4 COVERAGE (AAPL: septiembre se identifica sólo para diagnóstico; no se deriva ningún valor)")
     print("FY | metric | SEC | PostgreSQL | Yahoo | Híbrido | Yahoo date | YoY | motivo")
     for row in q4_rows:
@@ -634,7 +741,6 @@ def run_validation(ticker: str):
             "fiscal_year", "metric", "sec", "postgres", "yahoo", "hybrid", "yahoo_date", "yoy", "reason"
         )))
 
-    inputs = c_score_inputs(code_data, postgres)
     print("\nC-SCORE INPUT REPRODUCIBILITY")
     print("input | value | current | comparable/previous | source | reproducible | reason")
     for item in inputs:
@@ -664,7 +770,7 @@ def run_validation(ticker: str):
     print(f"HYBRID GLOBAL: {hybrid_numerator}/{hybrid_denominator} ({100 * hybrid_numerator / hybrid_denominator:.1f}%)")
     print(f"C INPUTS: {input_exact}/{len(inputs)} grupos reproducibles desde PostgreSQL")
 
-    return {"sec": sec_rows, "hybrid": hybrid_rows, "q4": q4_rows, "inputs": inputs}
+    return result
 
 
 def main(argv=None):
