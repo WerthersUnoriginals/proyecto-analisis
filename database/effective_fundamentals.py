@@ -1,13 +1,18 @@
-"""Pure SEC/Yahoo v2 contextual diagnostics; no source selection or persistence."""
+"""Pure SEC/Yahoo v2 comparison and compatible selection; no persistence."""
 
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from fractions import Fraction
+from itertools import combinations
+from typing import Sequence
 
 from database.normalized_fundamentals import (
     NormalizedObservation, SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2,
 )
 
 COMPARISON_RULES_VERSION = "sec-yahoo-comparison-v1"
+SELECTION_POLICY_VERSION = "c-v2.6-compatible-v1"
 
 
 @dataclass(frozen=True)
@@ -17,6 +22,14 @@ class ComparisonDiagnostic:
     comparison_reference_id: int | None
     comparison_diff_pct: float | None
     comparison_rules_version: str
+
+
+@dataclass(frozen=True)
+class EffectiveObservation:
+    observation: NormalizedObservation
+    selection_policy_version: str
+    selection_reason: str
+    comparison: ComparisonDiagnostic
 
 
 # Exact evidence aliases, scoped to their dataset. No substring inference.
@@ -35,23 +48,9 @@ _EPS_EVIDENCE = {
 }
 
 
-def compare_observations(
-    sec: NormalizedObservation, yahoo: NormalizedObservation,
-) -> ComparisonDiagnostic:
-    """Diagnose Yahoo against SEC (reference_id=sec.id), without altering either.
-
-    Reason codes are stable within COMPARISON_RULES_VERSION. The current
-    contract has no conversion registry: contradictory units or different raw
-    multipliers require review, rather than guessing a transformation. Values
-    are already normalized and must never be multiplied a second time.
-    """
+def _structural_reasons(sec, yahoo):
+    """Shared structural checks, including Yahoo/Yahoo variant compatibility."""
     reasons = []
-    if sec.source != "SEC" or yahoo.source != "YAHOO":
-        reasons.append("SOURCE_ROLE_MISMATCH")
-    if (sec.normalizer_version, yahoo.normalizer_version) != (
-        SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2,
-    ):
-        reasons.append("NORMALIZER_VERSION_MISMATCH")
     if sec.company_id != yahoo.company_id:
         reasons.append("COMPANY_MISMATCH")
     if sec.metric != yahoo.metric:
@@ -94,6 +93,27 @@ def compare_observations(
         reasons.append("NONFINITE_VALUE")
     elif (sec.value < 0 < yahoo.value) or (yahoo.value < 0 < sec.value):
         reasons.append("SIGN_INCOMPATIBLE")
+    return reasons
+
+
+def compare_observations(
+    sec: NormalizedObservation, yahoo: NormalizedObservation,
+) -> ComparisonDiagnostic:
+    """Diagnose Yahoo against SEC (reference_id=sec.id), without altering either.
+
+    Reason codes are stable within COMPARISON_RULES_VERSION. The current
+    contract has no conversion registry: contradictory units or different raw
+    multipliers require review, rather than guessing a transformation. Values
+    are already normalized and must never be multiplied a second time.
+    """
+    reasons = []
+    if sec.source != "SEC" or yahoo.source != "YAHOO":
+        reasons.append("SOURCE_ROLE_MISMATCH")
+    if (sec.normalizer_version, yahoo.normalizer_version) != (
+        SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2,
+    ):
+        reasons.append("NORMALIZER_VERSION_MISMATCH")
+    reasons.extend(_structural_reasons(sec, yahoo))
     if reasons:
         return ComparisonDiagnostic(
             "REVIEW_REQUIRED", tuple(reasons), sec.id, None, COMPARISON_RULES_VERSION,
@@ -115,3 +135,130 @@ def compare_observations(
     return ComparisonDiagnostic(
         status, (), sec.id, float(pct), COMPARISON_RULES_VERSION,
     )
+
+
+def _selection_candidate(item, as_of):
+    versions = {"SEC": SEC_NORMALIZER_V2, "YAHOO": YAHOO_NORMALIZER_V2}
+    variants = {
+        "SEC": {"sec.company_facts"},
+        "YAHOO": {"yahoo.fundamentals_timeseries", "yfinance.quarterly_income_stmt"},
+    }
+    if (
+        item.source not in versions
+        or item.normalizer_version != versions[item.source]
+        or item.source_variant not in variants[item.source]
+        or item.observation_kind != "REPORTED"
+        or item.selection_eligibility != "ELIGIBLE"
+        or item.metric not in {"EPS_DILUTED", "REVENUE", "NET_INCOME", "DILUTED_SHARES"}
+        or (item.source == "YAHOO" and item.metric == "DILUTED_SHARES")
+        or (as_of is not None and item.observed_at > as_of)
+    ):
+        return False
+    return not _structural_reasons(item, item)
+
+
+def _resolve_source_periods(items):
+    """SEC uses spec §9 filing/raw rank; ambiguous Yahoo snapshots are withheld.
+
+    Return ambiguous anchors too: losing their evidence must not silently
+    promote a lower-priority source at the same period.
+    """
+    groups = defaultdict(list)
+    for item in items:
+        if item not in groups[(item.company_id, item.metric, item.source_variant, item.source_period_end)]:
+            groups[(item.company_id, item.metric, item.source_variant, item.source_period_end)].append(item)
+    resolved, ambiguous = [], []
+    for group in groups.values():
+        if any(_structural_reasons(first, second) for first, second in combinations(group, 2)):
+            ambiguous.extend(group)
+            continue
+        if group[0].source == "SEC":
+            rank = max((item.filed_date, item.raw_id) for item in group)
+            best = [item for item in group if (item.filed_date, item.raw_id) == rank]
+        else:
+            best = group
+        if len(best) == 1:
+            resolved.extend(best)
+        else:
+            ambiguous.extend(group)
+    return resolved, ambiguous
+
+
+def _within_window(first, second):
+    return (
+        first.company_id == second.company_id and first.metric == second.metric
+        and abs((first.series_date - second.series_date).days) <= 35
+    )
+
+
+def _unique_nearest(item, candidates):
+    """Select the unique closest compatible counterpart, never break a tie."""
+    if not candidates:
+        return None
+    distance = min(abs((item.series_date - other.series_date).days) for other in candidates)
+    best = [other for other in candidates if abs((item.series_date - other.series_date).days) == distance]
+    return best[0] if len(best) == 1 else None
+
+
+def _not_compared(reason):
+    return ComparisonDiagnostic("NOT_COMPARED", (reason,), None, None, COMPARISON_RULES_VERSION)
+
+
+def select_effective_observations(
+    observations: Sequence[NormalizedObservation], as_of: datetime | None = None,
+) -> list[EffectiveObservation]:
+    """Select the four C-compatible metrics, preserving original objects/dates.
+
+    Apply observed_at before ranking. SEC filings use (filed_date, raw_id).
+    Yahoo TS precedes yfinance, then SEC precedes Yahoo, within inclusive 35
+    days and only with demonstrated structural compatibility. Material ties
+    and contradictory lower-priority evidence are withheld, never coerced into
+    fallback. EPS_BASIC remains distinct and is outside this diluted-C policy.
+    """
+    resolved, ambiguous = _resolve_source_periods(
+        [item for item in observations if _selection_candidate(item, as_of)]
+    )
+    sec = [item for item in resolved if item.source == "SEC"]
+    ts = [item for item in resolved if item.source_variant == "yahoo.fundamentals_timeseries"]
+    yf = [item for item in resolved if item.source_variant == "yfinance.quarterly_income_stmt"]
+    yahoo = list(ts)
+    for item in yf:
+        anchors = ts + [x for x in ambiguous if x.source_variant == "yahoo.fundamentals_timeseries"]
+        nearby = [other for other in anchors if _within_window(item, other)]
+        # Compatible TS wins; contradictory/ambiguous TS requires withholding
+        # the association as well. No lower-priority fallback hides that tie.
+        if not nearby:
+            yahoo.append(item)
+
+    counterparts = defaultdict(list)
+    result = []
+    for item in yahoo:
+        nearby = [other for other in sec if _within_window(item, other)]
+        blocked = any(_within_window(item, other) for other in ambiguous if other.source == "SEC")
+        compatible = [other for other in nearby if not _structural_reasons(other, item)]
+        best = _unique_nearest(item, compatible)
+        if blocked:
+            continue
+        if best is not None:
+            counterparts[best].append(item)
+        elif not nearby:
+            result.append(EffectiveObservation(
+                item, SELECTION_POLICY_VERSION, "YAHOO_FALLBACK_NO_SEC_WITHIN_35D",
+                _not_compared("NO_COMPARABLE_SEC_WITHIN_35D"),
+            ))
+        # Nearby but incompatible or tied: do not invent a fallback.
+    for item in sec:
+        other = _unique_nearest(item, counterparts[item])
+        diagnostic = compare_observations(item, other) if other is not None else _not_compared(
+            "AMBIGUOUS_YAHOO_COUNTERPART" if counterparts[item] else "NO_COMPARABLE_YAHOO_WITHIN_35D"
+        )
+        result.append(EffectiveObservation(
+            item, SELECTION_POLICY_VERSION,
+            "SEC_REPORTED_PRIORITY" if other is not None else "SEC_REPORTED_NO_COMPARABLE_YAHOO",
+            diagnostic,
+        ))
+    return sorted(result, key=lambda effective: (
+        effective.observation.company_id, effective.observation.metric,
+        effective.observation.series_date, effective.observation.source_variant,
+        effective.observation.raw_id,
+    ))
