@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Iterable, Sequence
@@ -27,9 +27,13 @@ def get_connection():
 SEC_VARIANT = "sec.company_facts"
 SEC_NORMALIZER_VERSION = "sec-normalized-v1"
 YAHOO_NORMALIZER_VERSION = "yahoo-normalized-v1"
+SEC_NORMALIZER_V2 = "sec-normalized-v2"
+YAHOO_NORMALIZER_V2 = "yahoo-normalized-v2"
 
 _METRIC_UNITS = {
     "EPS_DILUTED": "USD/shares",
+    "EPS_BASIC": "USD/shares",
+    "EPS_UNSPECIFIED": "USD/shares",
     "REVENUE": "USD",
     "NET_INCOME": "USD",
     "DILUTED_SHARES": "shares",
@@ -67,6 +71,9 @@ class NormalizedObservation:
     alignment_method: str
     alignment_days: int | None
     alignment_reference_id: int | None
+    source_metric_name: str | None = None
+    source_unit: str | None = None
+    source_scale_factor: Decimal | None = None
     id: int | None = None
 
     def __post_init__(self):
@@ -129,6 +136,21 @@ class NormalizedObservation:
             or self.selection_eligibility != "INELIGIBLE"
         ):
             raise ValueError("UNRESOLVED requiere revisión e inelegibilidad")
+        if self.normalizer_version in {SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2}:
+            if not self.source_metric_name or not self.source_metric_name.strip():
+                raise ValueError("v2 requiere source_metric_name")
+            if not self.source_unit or not self.source_unit.strip():
+                raise ValueError("v2 requiere source_unit")
+            if self.source_scale_factor is None or self.source_scale_factor <= 0:
+                raise ValueError("v2 requiere source_scale_factor positivo")
+        if self.metric == "EPS_UNSPECIFIED" and not (
+            self.source == "YAHOO"
+            and self.normalizer_version == YAHOO_NORMALIZER_V2
+            and self.source_metric_name == "legacy.unknown"
+            and self.intrinsic_quality_status == "REVIEW_REQUIRED"
+            and self.selection_eligibility == "INELIGIBLE"
+        ):
+            raise ValueError("EPS_UNSPECIFIED debe ser Yahoo legacy, revisable e inelegible")
 
 
 @dataclass(frozen=True)
@@ -148,6 +170,7 @@ _NORMALIZED_COLUMNS = (
     "fiscal_year", "fiscal_quarter", "filed_date", "source_available_at", "observed_at", "raw_id",
     "normalizer_version", "intrinsic_quality_status", "intrinsic_quality_reasons",
     "selection_eligibility", "alignment_method", "alignment_days", "alignment_reference_id",
+    "source_metric_name", "source_unit", "source_scale_factor",
 )
 
 INSERT_NORMALIZED_SQL = f"""
@@ -268,6 +291,32 @@ def normalize_sec_raw_row(row: dict, fiscal_identity: dict) -> NormalizedObserva
         alignment_method="EXACT",
         alignment_days=0,
         alignment_reference_id=None,
+    )
+
+
+def normalize_sec_raw_row_v2(row: dict, fiscal_identity: dict) -> NormalizedObservation:
+    """Añade semántica demostrable por el tag XBRL ya guardado en raw."""
+
+    item = normalize_sec_raw_row(row, fiscal_identity)
+    source_metric_name = row.get("xbrl_tag")
+    if not source_metric_name:
+        raise ValueError("SEC v2 requiere el tag XBRL original")
+    metric = item.metric
+    if metric in {"EPS_DILUTED", "EPS_BASIC"}:
+        lowered = source_metric_name.lower()
+        if "diluted" in lowered:
+            metric = "EPS_DILUTED"
+        elif "basic" in lowered:
+            metric = "EPS_BASIC"
+        else:
+            raise ValueError("El tag SEC no demuestra semántica EPS Basic/Diluted")
+    return replace(
+        item,
+        metric=metric,
+        normalizer_version=SEC_NORMALIZER_V2,
+        source_metric_name=source_metric_name,
+        source_unit=row["unit"],
+        source_scale_factor=Decimal("1"),
     )
 
 
@@ -472,6 +521,50 @@ def normalize_yahoo_raw_row(
     )
 
 
+def normalize_yahoo_raw_row_v2(
+    row: dict,
+    source_variant: str,
+    sec_calendar: Sequence[NormalizedObservation],
+) -> NormalizedObservation:
+    """Normaliza Yahoo v2 sin inventar semántica ausente en evidencia histórica."""
+
+    item = normalize_yahoo_raw_row(row, source_variant, sec_calendar)
+    payload = row.get("source_payload") or {}
+    source_metric_name = payload.get("source_metric_name")
+    if source_variant == "yahoo.fundamentals_timeseries":
+        source_metric_name = source_metric_name or str(payload.get("provider_id", "")).split(":", 1)[0]
+    metric = item.metric
+    reasons = item.intrinsic_quality_reasons
+    quality = item.intrinsic_quality_status
+    eligibility = item.selection_eligibility
+    if source_variant == "yfinance.quarterly_income_stmt" and metric in {
+        "EPS_DILUTED", "EPS_BASIC"
+    }:
+        if source_metric_name in {"Basic EPS", "BasicEPS"}:
+            metric = "EPS_BASIC"
+        elif source_metric_name in {"Diluted EPS", "DilutedEPS"}:
+            metric = "EPS_DILUTED"
+        else:
+            metric = "EPS_UNSPECIFIED"
+            source_metric_name = "legacy.unknown"
+            reasons = tuple(dict.fromkeys((*reasons, "LEGACY_YFINANCE_EPS_SEMANTICS_UNPROVEN_V2")))
+            quality = "REVIEW_REQUIRED"
+            eligibility = "INELIGIBLE"
+    if not source_metric_name:
+        source_metric_name = str(payload.get("provider_id", row["metric"])).split(":", 1)[0]
+    return replace(
+        item,
+        metric=metric,
+        normalizer_version=YAHOO_NORMALIZER_V2,
+        source_metric_name=source_metric_name,
+        source_unit=payload.get("source_unit") or row["unit"],
+        source_scale_factor=Decimal(str(payload.get("source_scale_factor", "1"))),
+        intrinsic_quality_reasons=reasons,
+        intrinsic_quality_status=quality,
+        selection_eligibility=eligibility,
+    )
+
+
 def _observation_values(observation: NormalizedObservation) -> tuple:
     return (
         observation.company_id, observation.metric, observation.source, observation.source_variant,
@@ -482,6 +575,7 @@ def _observation_values(observation: NormalizedObservation) -> tuple:
         observation.normalizer_version, observation.intrinsic_quality_status,
         Jsonb(list(observation.intrinsic_quality_reasons)), observation.selection_eligibility,
         observation.alignment_method, observation.alignment_days, observation.alignment_reference_id,
+        observation.source_metric_name, observation.source_unit, observation.source_scale_factor,
     )
 
 

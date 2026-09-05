@@ -5,13 +5,17 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from database.normalized_fundamentals import (
+    SEC_NORMALIZER_V2,
+    YAHOO_NORMALIZER_V2,
     YAHOO_NORMALIZER_VERSION,
     FiscalIdentityResult,
     NormalizedObservation,
     SEC_NORMALIZER_VERSION,
     _original_sec_fiscal_identity,
     normalize_yahoo_raw_row,
+    normalize_yahoo_raw_row_v2,
     normalize_sec_raw_row,
+    normalize_sec_raw_row_v2,
     resolve_yahoo_fiscal_identity,
     insert_normalized_batch,
     load_raw_fundamentals,
@@ -461,6 +465,97 @@ class YahooNormalizedTests(unittest.TestCase):
             self.assertEqual(insert_normalized_batch([item, item]), [201, 201])
 
 
+class SemanticsV2Tests(unittest.TestCase):
+    def test_sec_v2_preserves_xbrl_tag_unit_and_scale(self):
+        item = normalize_sec_raw_row_v2(
+            sec_row(), {"fiscal_year": 2025, "fiscal_quarter": 3}
+        )
+        self.assertEqual(item.normalizer_version, SEC_NORMALIZER_V2)
+        self.assertEqual(item.metric, "EPS_DILUTED")
+        self.assertEqual(item.source_metric_name, "EarningsPerShareDiluted")
+        self.assertEqual(item.source_unit, "USD/shares")
+        self.assertEqual(item.source_scale_factor, Decimal("1"))
+
+    def test_yahoo_timeseries_explicitly_proves_diluted_eps(self):
+        row = yahoo_row(source_payload={
+            "source_variant": "yahoo.fundamentals_timeseries",
+            "provider_id": "quarterlyDilutedEPS:2025-09-30",
+        })
+        item = normalize_yahoo_raw_row_v2(
+            row,
+            "yahoo.fundamentals_timeseries",
+            [
+                sec_observation(301, 2025, 3, date(2025, 6, 28)),
+                sec_observation(302, 2026, 1, date(2025, 12, 27)),
+            ],
+        )
+        self.assertEqual(item.normalizer_version, YAHOO_NORMALIZER_V2)
+        self.assertEqual(item.metric, "EPS_DILUTED")
+        self.assertEqual(item.source_metric_name, "quarterlyDilutedEPS")
+        self.assertEqual(item.source_unit, "USD/shares")
+        self.assertEqual(item.source_scale_factor, Decimal("1"))
+
+    def test_future_yfinance_eps_preserves_exact_basic_or_diluted_alias(self):
+        cases = (
+            ("Basic EPS", "EPS_BASIC"), ("BasicEPS", "EPS_BASIC"),
+            ("Diluted EPS", "EPS_DILUTED"), ("DilutedEPS", "EPS_DILUTED"),
+        )
+        calendar = [
+            sec_observation(301, 2025, 3, date(2025, 6, 28)),
+            sec_observation(302, 2026, 1, date(2025, 12, 27)),
+        ]
+        for alias, metric in cases:
+            with self.subTest(alias=alias):
+                row = yahoo_row(
+                    metric=metric,
+                    source_payload={
+                        "source_variant": "yfinance.quarterly_income_stmt",
+                        "source_metric_name": alias,
+                        "source_unit": "USD/shares",
+                        "source_scale_factor": "1",
+                    },
+                )
+                item = normalize_yahoo_raw_row_v2(
+                    row, "yfinance.quarterly_income_stmt", calendar
+                )
+                self.assertEqual(item.metric, metric)
+                self.assertEqual(item.source_metric_name, alias)
+
+    def test_historical_yfinance_eps_without_alias_remains_unspecified(self):
+        row = yahoo_row(source_payload={
+            "source_variant": "yfinance.quarterly_income_stmt",
+            "provider_id": "EPS_DILUTED:2025-09-30",
+        })
+        item = normalize_yahoo_raw_row_v2(
+            row,
+            "yfinance.quarterly_income_stmt",
+            [
+                sec_observation(301, 2025, 3, date(2025, 6, 28)),
+                sec_observation(302, 2026, 1, date(2025, 12, 27)),
+            ],
+        )
+        self.assertEqual(item.metric, "EPS_UNSPECIFIED")
+        self.assertEqual(item.source_metric_name, "legacy.unknown")
+        self.assertEqual(item.intrinsic_quality_status, "REVIEW_REQUIRED")
+        self.assertEqual(item.selection_eligibility, "INELIGIBLE")
+
+    def test_eps_unspecified_can_never_be_eligible(self):
+        row = yahoo_row(source_payload={
+            "source_variant": "yfinance.quarterly_income_stmt",
+            "provider_id": "EPS_DILUTED:2025-09-30",
+        })
+        item = normalize_yahoo_raw_row_v2(
+            row,
+            "yfinance.quarterly_income_stmt",
+            [
+                sec_observation(301, 2025, 3, date(2025, 6, 28)),
+                sec_observation(302, 2026, 1, date(2025, 12, 27)),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "inelegible|EPS_UNSPECIFIED"):
+            replace(item, selection_eligibility="ELIGIBLE")
+
+
 def item_to_db_row(item):
     return (
         item.company_id,
@@ -488,6 +583,9 @@ def item_to_db_row(item):
         item.alignment_method,
         item.alignment_days,
         item.alignment_reference_id,
+        item.source_metric_name,
+        item.source_unit,
+        item.source_scale_factor,
     )
 
 

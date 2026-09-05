@@ -28,6 +28,13 @@ class FakeStock:
     )
 
 
+class FakeBasicStock:
+    quarterly_income_stmt = pd.DataFrame(
+        {pd.Timestamp("2025-09-30"): [Decimal("1.80")]},
+        index=["Basic EPS"],
+    )
+
+
 def fake_timeseries(ticker, series_types, years=5):
     del ticker, years
     values = {
@@ -64,6 +71,34 @@ class YahooExtractionTests(unittest.TestCase):
         self.assertEqual(eps["source_payload"]["source_variant"], TIMESERIES_VARIANT)
         self.assertEqual(revenue["source_payload"]["source_variant"], YFINANCE_VARIANT)
         self.assertIn("provider_id", eps["source_payload"])
+        self.assertEqual(eps["source_metric_name"], "quarterlyDilutedEPS")
+        self.assertEqual(eps["source_unit"], "USD/shares")
+        self.assertEqual(eps["source_scale_factor"], Decimal("1"))
+
+    def test_yfinance_preserves_the_exact_diluted_alias(self):
+        rows = extract_yahoo_raw_facts("AAPL", 1, OBSERVED, clients=fake_clients())
+        eps = next(
+            row for row in rows
+            if row["source_variant"] == YFINANCE_VARIANT and row["metric"] == "EPS_DILUTED"
+        )
+
+        self.assertEqual(eps["source_metric_name"], "Diluted EPS")
+        self.assertEqual(eps["source_payload"]["source_metric_name"], "Diluted EPS")
+
+    def test_yfinance_basic_eps_remains_basic_and_is_never_labeled_diluted(self):
+        rows = extract_yahoo_raw_facts(
+            "AAPL",
+            1,
+            OBSERVED,
+            clients={"timeseries_fetcher": fake_timeseries, "stock": FakeBasicStock()},
+        )
+        eps = [row for row in rows if row["source_variant"] == YFINANCE_VARIANT]
+
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(eps[0]["metric"], "EPS_BASIC")
+        self.assertEqual(eps[0]["source_metric_name"], "Basic EPS")
+        self.assertEqual(eps[0]["source_unit"], "USD/shares")
+        self.assertEqual(eps[0]["source_scale_factor"], Decimal("1"))
 
     def test_record_id_is_stable_canonical_and_changes_with_value(self):
         semantic = {"metric": "EPS_DILUTED", "period": "2025-09-30", "value": "1.85", "unit": "USD/shares", "currency": "USD"}

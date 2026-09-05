@@ -21,13 +21,15 @@ YAHOO_TYPES = {
 }
 
 YFINANCE_ALIASES = {
-    "EPS_DILUTED": ["Diluted EPS", "Basic EPS", "DilutedEPS", "BasicEPS"],
+    "EPS_DILUTED": ["Diluted EPS", "DilutedEPS"],
+    "EPS_BASIC": ["Basic EPS", "BasicEPS"],
     "REVENUE": ["Total Revenue", "Operating Revenue"],
     "NET_INCOME": ["Net Income", "Net Income Common Stockholders"],
 }
 
 METRIC_UNITS = {
     "EPS_DILUTED": "USD/shares",
+    "EPS_BASIC": "USD/shares",
     "REVENUE": "USD",
     "NET_INCOME": "USD",
 }
@@ -58,12 +60,16 @@ def _raw_fact(
     value,
     unit: str,
     observed_at: datetime,
+    source_metric_name: str,
 ) -> dict:
     decimal_value = Decimal(str(value))
     semantic_payload = {
         "currency": "USD",
         "metric": metric,
         "period": period_end.isoformat(),
+        "source_metric_name": source_metric_name,
+        "source_scale_factor": "1",
+        "source_unit": unit,
         "unit": unit,
         "value": str(decimal_value),
     }
@@ -87,6 +93,9 @@ def _raw_fact(
         "xbrl_tag": None,
         "source_record_id": source_record_id,
         "source_available_at": None,
+        "source_metric_name": source_metric_name,
+        "source_unit": unit,
+        "source_scale_factor": Decimal("1"),
         "fetched_at": observed_at,
         "source_payload": {
             "provider": "Yahoo Finance",
@@ -94,8 +103,22 @@ def _raw_fact(
             "semantic_payload": semantic_payload,
             "source_available_at": None,
             "source_variant": source_variant,
+            "source_metric_name": source_metric_name,
+            "source_unit": unit,
+            "source_scale_factor": "1",
         },
     }
+
+
+def _extract_named_row(frame, aliases):
+    if frame is None or frame.empty:
+        return None, None
+    normalized = {str(index).strip().lower(): index for index in frame.index}
+    for alias in aliases:
+        original = normalized.get(alias.strip().lower())
+        if original is not None:
+            return str(original), frame.loc[original]
+    return None, None
 
 
 def extract_yahoo_raw_facts(
@@ -137,24 +160,26 @@ def extract_yahoo_raw_facts(
                 value,
                 unit,
                 observed_at,
+                series_type,
             ))
-
-    from fundamental_c import _extract_row
 
     income = clients["stock"].quarterly_income_stmt
     for metric, aliases in YFINANCE_ALIASES.items():
-        series = _extract_row(income, aliases)
+        source_metric_name, series = _extract_named_row(income, aliases)
+        if series is None:
+            continue
         for item_date, value in series.dropna().sort_index().items():
             period_end = item_date.date()
             facts.append(_raw_fact(
                 company_id,
                 YFINANCE_VARIANT,
-                f"{metric}:{period_end.isoformat()}",
+                f"{source_metric_name}:{period_end.isoformat()}",
                 metric,
                 period_end,
                 value,
                 METRIC_UNITS[metric],
                 observed_at,
+                source_metric_name,
             ))
 
     return facts
