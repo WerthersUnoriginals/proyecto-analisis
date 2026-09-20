@@ -11,6 +11,50 @@ import unittest
 
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "database" / "schema_fundamentals_effective.sql"
+MIGRATION_PATH = (
+    Path(__file__).resolve().parent
+    / "database"
+    / "migrations"
+    / "2026-09-20_fundamentals_effective_current_v2.sql"
+)
+
+EFFECTIVE_CURRENT_COLUMNS = (
+    "company_id",
+    "metric",
+    "fiscal_year",
+    "fiscal_quarter",
+    "canonical_period_end",
+    "series_date",
+    "value",
+    "unit",
+    "currency",
+    "source",
+    "source_variant",
+    "observation_kind",
+    "selected_observation_id",
+    "raw_id",
+    "source_metric_name",
+    "source_unit",
+    "source_scale_factor",
+    "source_period_start",
+    "source_period_end",
+    "filed_date",
+    "source_available_at",
+    "observed_at",
+    "normalizer_version",
+    "intrinsic_quality_status",
+    "selection_eligibility",
+    "selection_policy_version",
+    "selection_reason",
+    "comparison_rules_version",
+    "comparison_status",
+    "comparison_reason",
+    "comparison_reference_id",
+    "comparison_difference_pct",
+    "alignment_method",
+    "alignment_days",
+    "alignment_reference_id",
+)
 
 EXPECTED_COLUMNS = [
     ("id", "BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY"),
@@ -206,6 +250,62 @@ class EffectiveSchemaTests(unittest.TestCase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, lowered)
+
+
+class EffectiveCurrentMigrationTests(unittest.TestCase):
+    """Static safety and interface contract for the unapplied Task 9A view."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sql = MIGRATION_PATH.read_text(encoding="utf-8")
+        cls.lowered = cls.sql.lower()
+        cls.compact = compact(cls.sql)
+
+    def test_creates_one_plain_view_without_mutation_or_materialization(self):
+        self.assertEqual(
+            len(re.findall(r"\bCREATE\s+VIEW\s+fundamentals_effective_current\b", self.sql, re.I)),
+            1,
+        )
+        for forbidden in (
+            "create table",
+            "materialized view",
+            "create trigger",
+            "insert ",
+            "update ",
+            "delete ",
+            "truncate ",
+            "alter table",
+            "drop ",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.lowered)
+
+    def test_pins_only_v2_normalizers_and_contract_versions(self):
+        self.assertIn("'sec-normalized-v2'", self.sql)
+        self.assertIn("'yahoo-normalized-v2'", self.sql)
+        self.assertNotIn("normalized-v1", self.sql)
+        self.assertNotRegex(self.sql, r"MAX\s*\(\s*normalizer_version", re.I)
+        self.assertIn("'c-v2.6-compatible-v1'", self.sql)
+        self.assertIn("'sec-yahoo-comparison-v1'", self.sql)
+
+    def test_excludes_non_current_sources_metrics_and_kinds(self):
+        for required in (
+            "source IN ('SEC', 'YAHOO')",
+            "observation_kind = 'REPORTED'",
+            "selection_eligibility = 'ELIGIBLE'",
+            "metric IN ('EPS_DILUTED', 'REVENUE', 'NET_INCOME', 'DILUTED_SHARES')",
+            "normalized.source = 'YAHOO' AND normalized.metric = 'DILUTED_SHARES'",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, self.compact)
+
+    def test_exposes_the_complete_minimum_contract(self):
+        for column in EFFECTIVE_CURRENT_COLUMNS:
+            with self.subTest(column=column):
+                self.assertRegex(self.sql, rf"\bAS\s+{column}\b")
+        for forbidden in ("yoy", "acceleration", "persistence", "trend_quality", "score"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.lowered)
 
 
 if __name__ == "__main__":

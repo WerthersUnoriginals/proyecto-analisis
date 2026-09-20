@@ -1,11 +1,13 @@
-"""Contract tests for contextual diagnostics; no database or provider calls."""
+"""Pure contracts plus opt-in, rollback-only PostgreSQL projection equivalence."""
 
+import os
 import unittest
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import date, datetime, timedelta, timezone
 from itertools import permutations
 from decimal import Decimal
+from pathlib import Path
 
 from database.normalized_fundamentals import NormalizedObservation
 from database.effective_fundamentals import (
@@ -277,6 +279,251 @@ class SelectionTests(unittest.TestCase):
             observed_at=first.observed_at + timedelta(days=1))
         for order in ((first, later), (later, first)):
             self.assertEqual(select_effective_observations(order), [])
+
+
+def sql_fixture_observation(source, row_id, company_id, end, value="100", metric="EPS_DILUTED", **changes):
+    unit = {
+        "EPS_DILUTED": "USD/shares",
+        "EPS_BASIC": "USD/shares",
+        "EPS_UNSPECIFIED": "USD/shares",
+        "REVENUE": "USD",
+        "NET_INCOME": "USD",
+        "DILUTED_SHARES": "shares",
+    }[metric]
+    source_metric_name = {
+        ("SEC", "EPS_DILUTED"): "EarningsPerShareDiluted",
+        ("SEC", "EPS_BASIC"): "EarningsPerShareBasic",
+        ("SEC", "REVENUE"): "RevenueFromContractWithCustomerExcludingAssessedTax",
+        ("SEC", "NET_INCOME"): "NetIncomeLoss",
+        ("SEC", "DILUTED_SHARES"): "WeightedAverageNumberOfDilutedSharesOutstanding",
+        ("YAHOO", "EPS_DILUTED"): "quarterlyDilutedEPS",
+        ("YAHOO", "EPS_BASIC"): "Basic EPS",
+        ("YAHOO", "EPS_UNSPECIFIED"): "legacy.unknown",
+        ("YAHOO", "REVENUE"): "quarterlyTotalRevenue",
+        ("YAHOO", "NET_INCOME"): "quarterlyNetIncome",
+    }.get((source, metric), "derived.test")
+    canonical = changes.pop("canonical_period_end", end)
+    alignment_days = None if canonical is None else (end - canonical).days
+    alignment_method = "EXACT" if alignment_days == 0 else "NEAREST_35D"
+    fields = dict(
+        id=row_id,
+        raw_id=row_id,
+        company_id=company_id,
+        metric=metric,
+        source_period_start=end - timedelta(days=90) if source == "SEC" else None,
+        source_period_end=end,
+        canonical_period_end=canonical,
+        series_date=end,
+        fiscal_year=2025,
+        fiscal_quarter=3,
+        value=value,
+        unit=unit,
+        source_unit=unit,
+        currency=None if unit == "shares" else "USD",
+        source_metric_name=source_metric_name,
+        alignment_method=alignment_method,
+        alignment_days=alignment_days,
+        alignment_reference_id=None,
+        filed_date=date(2025, 8, 1) if source == "SEC" else None,
+    )
+    fields.update(changes)
+    return observation(source, **fields)
+
+
+def sql_equivalence_fixture():
+    rows = [
+        # Inclusive 35-day SEC/Yahoo comparison; TS suppresses yfinance.
+        sql_fixture_observation("SEC", 1001, 10, date(2025, 6, 28)),
+        sql_fixture_observation("YAHOO", 1002, 10, date(2025, 8, 2), canonical_period_end=date(2025, 6, 28)),
+        sql_fixture_observation(
+            "YAHOO", 1003, 10, date(2025, 8, 2), canonical_period_end=date(2025, 6, 28),
+            source_variant="yfinance.quarterly_income_stmt", source_metric_name="Diluted EPS",
+        ),
+        # 36 days is outside the window: both SEC and Yahoo fallback remain.
+        sql_fixture_observation("SEC", 1101, 11, date(2025, 6, 28), metric="REVENUE"),
+        sql_fixture_observation(
+            "YAHOO", 1102, 11, date(2025, 8, 3), metric="REVENUE",
+            canonical_period_end=date(2025, 6, 28),
+        ),
+        # SEC without Yahoo.
+        sql_fixture_observation("SEC", 1201, 12, date(2025, 6, 28), metric="NET_INCOME"),
+        # Append-only SEC filings: later filing/raw rank wins.
+        sql_fixture_observation(
+            "SEC", 1301, 13, date(2025, 6, 28), value="90", metric="REVENUE",
+            filed_date=date(2025, 7, 1), raw_id=1301,
+        ),
+        sql_fixture_observation(
+            "SEC", 1302, 13, date(2025, 6, 28), value="100", metric="REVENUE",
+            filed_date=date(2025, 8, 1), raw_id=1302,
+        ),
+        # Equidistant compatible SEC candidates create a material tie.
+        sql_fixture_observation(
+            "SEC", 1401, 14, date(2025, 5, 24), canonical_period_end=date(2025, 6, 28),
+        ),
+        sql_fixture_observation(
+            "SEC", 1402, 14, date(2025, 8, 2), canonical_period_end=date(2025, 6, 28),
+        ),
+        sql_fixture_observation("YAHOO", 1403, 14, date(2025, 6, 28)),
+        # Sign and structural conflicts must not create Yahoo fallback.
+        sql_fixture_observation("SEC", 1501, 15, date(2025, 6, 28), value="1"),
+        sql_fixture_observation("YAHOO", 1502, 15, date(2025, 6, 28), value="-1"),
+        sql_fixture_observation("SEC", 1601, 16, date(2025, 6, 28), metric="REVENUE"),
+        sql_fixture_observation(
+            "YAHOO", 1602, 16, date(2025, 6, 28), metric="REVENUE", currency="EUR",
+        ),
+        # Explicit exclusions.
+        sql_fixture_observation("SEC", 1701, 17, date(2025, 6, 28), metric="EPS_BASIC"),
+        sql_fixture_observation(
+            "YAHOO", 1702, 17, date(2025, 6, 28), metric="EPS_UNSPECIFIED",
+            source_variant="yfinance.quarterly_income_stmt", source_metric_name="legacy.unknown",
+            intrinsic_quality_status="REVIEW_REQUIRED", selection_eligibility="INELIGIBLE",
+        ),
+        replace(
+            sql_fixture_observation(
+                "YAHOO", 1703, 17, date(2025, 6, 28), metric="REVENUE",
+            ),
+            source="DERIVED", source_variant="derived.test", observation_kind="DERIVED",
+            normalizer_version="derived-v1", selection_eligibility="INELIGIBLE",
+        ),
+        sql_fixture_observation(
+            "SEC", 1704, 17, date(2025, 6, 28), normalizer_version="sec-normalized-v1",
+        ),
+    ]
+    return rows
+
+
+@unittest.skipUnless(
+    os.getenv("CANSLIM_TEST_POSTGRES") == "1",
+    "set CANSLIM_TEST_POSTGRES=1 for rollback-only PostgreSQL equivalence",
+)
+class SqlProjectionEquivalenceTests(unittest.TestCase):
+    migration_path = (
+        Path(__file__).resolve().parent
+        / "database"
+        / "migrations"
+        / "2026-09-20_fundamentals_effective_current_v2.sql"
+    )
+
+    def execute_projection(self, observations):
+        from psycopg.rows import dict_row
+        from psycopg.types.json import Jsonb
+        from database.db import get_connection
+
+        columns = tuple(NormalizedObservation.__dataclass_fields__)
+        placeholders = ", ".join(["%s"] * len(columns))
+        insert_sql = (
+            f"INSERT INTO fundamentals_normalized ({', '.join(columns)}) "
+            f"VALUES ({placeholders})"
+        )
+        connection = get_connection()
+        try:
+            connection.execute(
+                "CREATE TEMP TABLE fundamentals_normalized "
+                "(LIKE public.fundamentals_normalized INCLUDING DEFAULTS) ON COMMIT DROP"
+            )
+            values = []
+            for item in observations:
+                row = asdict(item)
+                row["intrinsic_quality_reasons"] = Jsonb(list(item.intrinsic_quality_reasons))
+                values.append(tuple(row[column] for column in columns))
+            with connection.cursor() as cursor:
+                cursor.executemany(insert_sql, values)
+            ddl = self.migration_path.read_text(encoding="utf-8").replace(
+                "CREATE VIEW fundamentals_effective_current",
+                "CREATE TEMP VIEW fundamentals_effective_current",
+                1,
+            )
+            connection.execute(ddl)
+            with connection.cursor(row_factory=dict_row) as cursor:
+                cursor.execute("SELECT * FROM fundamentals_effective_current")
+                return cursor.fetchall()
+        finally:
+            connection.rollback()
+            connection.close()
+
+    def assert_projection_matches_python(self, observations):
+        expected = select_effective_observations(observations)
+        actual = self.execute_projection(observations)
+        self.assertEqual(len(actual), len(expected))
+        core_fields = (
+            "selected_observation_id",
+            "metric",
+            "series_date",
+            "value",
+            "source",
+            "source_variant",
+            "selection_reason",
+            "comparison_status",
+            "comparison_reason",
+            "comparison_reference_id",
+        )
+        expected_rows = []
+        for item in expected:
+            observation_row = item.observation
+            expected_rows.append({
+                "selected_observation_id": observation_row.id,
+                "metric": observation_row.metric,
+                "series_date": observation_row.series_date,
+                "value": observation_row.value,
+                "source": observation_row.source,
+                "source_variant": observation_row.source_variant,
+                "selection_reason": item.selection_reason,
+                "comparison_status": item.comparison.comparison_status,
+                "comparison_reason": (
+                    item.comparison.comparison_reasons[0]
+                    if item.comparison.comparison_reasons else None
+                ),
+                "comparison_reference_id": item.comparison.comparison_reference_id,
+                "comparison_difference_pct": item.comparison.comparison_diff_pct,
+            })
+        self.assertEqual(
+            [[row[field] for field in core_fields] for row in actual],
+            [[row[field] for field in core_fields] for row in expected_rows],
+        )
+        for sql_row, python_row in zip(actual, expected_rows):
+            expected_difference = python_row["comparison_difference_pct"]
+            if expected_difference is None:
+                self.assertIsNone(sql_row["comparison_difference_pct"])
+            else:
+                self.assertAlmostEqual(
+                    float(sql_row["comparison_difference_pct"]), expected_difference, places=12,
+                )
+        return actual
+
+    def test_sql_matches_python_for_all_task_9a_synthetic_cases(self):
+        fixture = sql_equivalence_fixture()
+        forward = self.assert_projection_matches_python(fixture)
+        reverse = self.assert_projection_matches_python(list(reversed(fixture)))
+        self.assertEqual(forward, reverse)
+
+        selected_ids = {row["selected_observation_id"] for row in forward}
+        self.assertIn(1001, selected_ids)  # inclusive 35-day SEC priority
+        self.assertNotIn(1002, selected_ids)
+        self.assertNotIn(1003, selected_ids)  # TS suppresses yfinance
+        self.assertIn(1102, selected_ids)  # 36-day Yahoo fallback
+        self.assertNotIn(1301, selected_ids)
+        self.assertIn(1302, selected_ids)  # later SEC amendment
+        self.assertNotIn(1403, selected_ids)  # material nearest tie
+        self.assertNotIn(1502, selected_ids)  # sign conflict
+        self.assertNotIn(1602, selected_ids)  # structural conflict
+        for excluded in (1701, 1702, 1703, 1704):
+            self.assertNotIn(excluded, selected_ids)
+
+
+class SelectionResolutionTests(unittest.TestCase):
+    def yfinance(self, offset=0, **fields):
+        end = date(2025, 6, 28) + timedelta(days=offset)
+        fields = dict(dict(
+            id=203,
+            raw_id=3,
+            source_variant="yfinance.quarterly_income_stmt",
+            source_metric_name="Diluted EPS",
+            source_period_end=end,
+            series_date=end,
+            alignment_method="FISCAL_METADATA",
+            alignment_days=offset,
+        ), **fields)
+        return observation("YAHOO", **fields)
 
     def test_same_sec_rank_with_conflicting_content_is_excluded(self):
         first = observation("SEC")
