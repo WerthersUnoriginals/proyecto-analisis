@@ -9,11 +9,67 @@ from itertools import combinations
 from typing import Sequence
 
 from database.normalized_fundamentals import (
-    NormalizedObservation, SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2,
+    NormalizedObservation, SEC_NORMALIZER_V2, YAHOO_NORMALIZER_V2, get_connection,
 )
 
 COMPARISON_RULES_VERSION = "sec-yahoo-comparison-v1"
 SELECTION_POLICY_VERSION = "c-v2.6-compatible-v1"
+
+
+_LOAD_EFFECTIVE_CURRENT_SQL = """
+    SELECT
+        company_id,
+        metric,
+        fiscal_year,
+        fiscal_quarter,
+        canonical_period_end,
+        series_date,
+        value,
+        unit,
+        currency,
+        source,
+        source_variant,
+        observation_kind,
+        selected_observation_id,
+        raw_id,
+        source_metric_name,
+        source_unit,
+        source_scale_factor,
+        source_period_start,
+        source_period_end,
+        filed_date,
+        source_available_at,
+        observed_at,
+        normalizer_version,
+        intrinsic_quality_status,
+        selection_eligibility,
+        selection_policy_version,
+        selection_reason,
+        comparison_rules_version,
+        comparison_status,
+        comparison_reason,
+        comparison_reference_id,
+        comparison_difference_pct,
+        alignment_method,
+        alignment_days,
+        alignment_reference_id
+    FROM fundamentals_effective_current
+    WHERE company_id = %s
+    ORDER BY company_id, metric, series_date, source_variant, raw_id
+"""
+
+
+def load_effective_current(company_id: int) -> list[dict]:
+    """Read the deployed effective projection without re-running selection."""
+
+    connection = get_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(_LOAD_EFFECTIVE_CURRENT_SQL, (company_id,))
+            columns = [description.name for description in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    finally:
+        connection.close()
 
 
 @dataclass(frozen=True)

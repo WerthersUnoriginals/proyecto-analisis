@@ -8,7 +8,10 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import permutations
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import database.effective_fundamentals as effective_module
 from database.normalized_fundamentals import NormalizedObservation
 from database.effective_fundamentals import (
     ComparisonDiagnostic,
@@ -19,6 +22,85 @@ from database.effective_fundamentals import (
     growth_yoy_by_source,
     select_effective_observations,
 )
+
+
+class LoaderCursor:
+    def __init__(self, columns, rows):
+        self.description = [SimpleNamespace(name=name) for name in columns]
+        self.rows = rows
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def execute(self, query, params):
+        self.calls.append((query, params))
+
+    def fetchall(self):
+        return self.rows
+
+
+class LoaderConnection:
+    def __init__(self, columns, rows):
+        self.loader_cursor = LoaderCursor(columns, rows)
+        self.closed = False
+
+    def cursor(self):
+        return self.loader_cursor
+
+    def close(self):
+        self.closed = True
+
+    def commit(self):
+        raise AssertionError("A read-only loader must not commit")
+
+
+class EffectiveCurrentLoaderTests(unittest.TestCase):
+    def run_loader(self, company_id, columns, rows):
+        connection = LoaderConnection(columns, rows)
+        with patch.object(effective_module, "get_connection", return_value=connection):
+            result = effective_module.load_effective_current(company_id)
+        return result, connection
+
+    def test_valid_company_returns_dicts_with_native_values_and_none(self):
+        columns = ("selected_observation_id", "value", "comparison_reason")
+        rows = [(101, Decimal("1.25"), None)]
+
+        result, connection = self.run_loader(7, columns, rows)
+
+        self.assertEqual(result, [{
+            "selected_observation_id": 101,
+            "value": Decimal("1.25"),
+            "comparison_reason": None,
+        }])
+        self.assertTrue(connection.closed)
+
+    def test_company_without_rows_returns_empty_list(self):
+        result, _ = self.run_loader(999, ("selected_observation_id",), [])
+
+        self.assertEqual(result, [])
+
+    def test_query_is_parameterized_read_only_and_uses_only_the_view(self):
+        _, connection = self.run_loader(17, ("selected_observation_id",), [])
+
+        self.assertEqual(len(connection.loader_cursor.calls), 1)
+        query, params = connection.loader_cursor.calls[0]
+        normalized_query = " ".join(query.lower().split())
+        self.assertEqual(params, (17,))
+        self.assertIn("where company_id = %s", normalized_query)
+        self.assertNotIn("17", query)
+        self.assertIn("from fundamentals_effective_current", normalized_query)
+        self.assertNotIn("fundamentals_normalized", normalized_query)
+        self.assertNotIn("fundamentals_raw", normalized_query)
+        self.assertIn(
+            "order by company_id, metric, series_date, source_variant, raw_id",
+            normalized_query,
+        )
+        for forbidden in ("insert", "update", "delete", "truncate", "alter", "drop", "create"):
+            self.assertNotIn(forbidden, normalized_query.split())
 
 
 def observation(source, value="100", **changes):
