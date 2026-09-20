@@ -14,9 +14,11 @@ from unittest.mock import patch
 import database.effective_fundamentals as effective_module
 from database.normalized_fundamentals import NormalizedObservation
 from database.effective_fundamentals import (
+    AnnualComparison,
     ComparisonDiagnostic,
     EffectiveObservation,
     YoYGrowth,
+    annual_comparisons_by_source,
     compare_observations,
     growth_acceleration_by_source,
     growth_yoy_by_source,
@@ -729,6 +731,126 @@ def effective(source, series_date, value="100", metric="EPS_DILUTED", row_id=1):
         "TEST_EFFECTIVE",
         ComparisonDiagnostic("NOT_COMPARED", (), None, None, "sec-yahoo-comparison-v1"),
     )
+
+
+class AnnualComparisonTests(unittest.TestCase):
+    current_date = date(2025, 6, 30)
+    target_date = current_date - timedelta(days=365)
+
+    def comparisons(self, previous="100"):
+        comparable = effective("SEC", self.target_date, previous, row_id=1)
+        current_observation = effective("SEC", self.current_date, "120", row_id=2)
+        return annual_comparisons_by_source(
+            [comparable, current_observation], "EPS_DILUTED",
+        )
+
+    def test_exact_annual_target_returns_traced_pair(self):
+        result = self.comparisons()
+
+        self.assertEqual(len(result), 1)
+        self.assertIsInstance(result[0], AnnualComparison)
+        self.assertEqual(result[0].current.observation.id, 2)
+        self.assertEqual(result[0].comparable.observation.id, 1)
+
+    def test_annual_window_includes_45_and_excludes_46_days(self):
+        for offset in (-45, 45):
+            with self.subTest(offset=offset):
+                comparable = effective(
+                    "SEC", self.target_date + timedelta(days=offset), row_id=1,
+                )
+                current = effective("SEC", self.current_date, "120", row_id=2)
+                self.assertEqual(
+                    len(annual_comparisons_by_source(
+                        [comparable, current], "EPS_DILUTED",
+                    )),
+                    1,
+                )
+        for offset in (-46, 46):
+            with self.subTest(offset=offset):
+                comparable = effective(
+                    "SEC", self.target_date + timedelta(days=offset), row_id=1,
+                )
+                current = effective("SEC", self.current_date, "120", row_id=2)
+                self.assertEqual(
+                    annual_comparisons_by_source(
+                        [comparable, current], "EPS_DILUTED",
+                    ),
+                    [],
+                )
+
+    def test_never_crosses_source_metric_or_company(self):
+        current = effective("SEC", self.current_date, "120", row_id=2)
+        mismatches = (
+            effective("YAHOO", self.target_date, row_id=1),
+            effective("SEC", self.target_date, metric="REVENUE", row_id=3),
+            replace(
+                effective("SEC", self.target_date, row_id=4),
+                observation=replace(
+                    effective("SEC", self.target_date, row_id=4).observation,
+                    company_id=2,
+                ),
+            ),
+        )
+        for comparable in mismatches:
+            with self.subTest(comparable=comparable.observation):
+                self.assertEqual(
+                    annual_comparisons_by_source(
+                        [comparable, current], "EPS_DILUTED",
+                    ),
+                    [],
+                )
+
+    def test_metric_argument_filters_the_requested_series(self):
+        rows = [
+            effective("SEC", self.target_date, row_id=1),
+            effective("SEC", self.current_date, "120", row_id=2),
+        ]
+
+        self.assertEqual(annual_comparisons_by_source(rows, "REVENUE"), [])
+
+    def test_nearest_selection_is_deterministic_and_order_independent(self):
+        current = effective("SEC", self.current_date, "120", row_id=3)
+        nearest = effective("SEC", self.target_date - timedelta(days=1), row_id=1)
+        farther = effective("SEC", self.target_date - timedelta(days=10), row_id=2)
+        rows = [current, nearest, farther]
+
+        expected = annual_comparisons_by_source(rows, "EPS_DILUTED")
+        self.assertEqual(
+            annual_comparisons_by_source(list(reversed(rows)), "EPS_DILUTED"),
+            expected,
+        )
+        self.assertEqual(expected[0].comparable.observation.id, 1)
+
+    def test_equidistant_material_tie_has_no_comparison(self):
+        current = effective("SEC", self.current_date, "120", row_id=3)
+        left = effective("SEC", self.target_date - timedelta(days=10), row_id=1)
+        right = effective("SEC", self.target_date + timedelta(days=10), row_id=2)
+
+        for rows in ([left, current, right], [right, current, left]):
+            self.assertEqual(
+                annual_comparisons_by_source(rows, "EPS_DILUTED"), [],
+            )
+
+    def test_positive_zero_and_negative_comparables_are_preserved(self):
+        for previous in ("100", "0", "-50"):
+            with self.subTest(previous=previous):
+                comparison = self.comparisons(previous=previous)[0]
+                self.assertEqual(
+                    comparison.comparable.observation.value, Decimal(previous),
+                )
+                self.assertEqual(comparison.current.observation.value, Decimal("120"))
+
+    def test_yoy_still_requires_a_strictly_positive_comparable(self):
+        cases = (("100", 1), ("0", 0), ("-50", 0))
+        for previous, expected_growth_count in cases:
+            with self.subTest(previous=previous):
+                comparable = effective("SEC", self.target_date, previous, row_id=1)
+                current = effective("SEC", self.current_date, "120", row_id=2)
+                rows = [comparable, current]
+                self.assertEqual(
+                    len(annual_comparisons_by_source(rows, "EPS_DILUTED")), 1,
+                )
+                self.assertEqual(len(growth_yoy_by_source(rows)), expected_growth_count)
 
 
 class GrowthTests(unittest.TestCase):

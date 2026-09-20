@@ -90,6 +90,12 @@ class EffectiveObservation:
 
 
 @dataclass(frozen=True)
+class AnnualComparison:
+    current: EffectiveObservation
+    comparable: EffectiveObservation
+
+
+@dataclass(frozen=True)
 class YoYGrowth:
     current: EffectiveObservation
     comparable: EffectiveObservation
@@ -358,36 +364,59 @@ def _growth_input(item):
     )
 
 
-def _annual_comparable(current, rows):
-    target = date.fromordinal(
-        current.observation.series_date.toordinal() - 365
-    )
-    candidates = [
-        item for item in rows
-        if item is not current
-        and item.observation.company_id == current.observation.company_id
-        and item.observation.metric == current.observation.metric
-        and item.observation.source == current.observation.source
-        and abs((item.observation.series_date - target).days) <= 45
+def annual_comparisons_by_source(
+    observations: Sequence[EffectiveObservation], metric: str,
+) -> list[AnnualComparison]:
+    """Return unique annual pairs before applying numeric YoY restrictions."""
+    eligible = [
+        item for item in observations
+        if _growth_input(item) and item.observation.metric == metric
     ]
-    if not candidates:
-        return None
-    distance = min(abs((item.observation.series_date - target).days) for item in candidates)
-    nearest = [
-        item for item in candidates
-        if abs((item.observation.series_date - target).days) == distance
-    ]
-    return nearest[0] if len(nearest) == 1 else None
+    comparisons = []
+    for current in eligible:
+        target = date.fromordinal(
+            current.observation.series_date.toordinal() - 365
+        )
+        candidates = [
+            item for item in eligible
+            if item is not current
+            and item.observation.company_id == current.observation.company_id
+            and item.observation.source == current.observation.source
+            and abs((item.observation.series_date - target).days) <= 45
+        ]
+        if not candidates:
+            continue
+        distance = min(
+            abs((item.observation.series_date - target).days)
+            for item in candidates
+        )
+        nearest = [
+            item for item in candidates
+            if abs((item.observation.series_date - target).days) == distance
+        ]
+        if len(nearest) == 1:
+            comparisons.append(AnnualComparison(current, nearest[0]))
+    return sorted(comparisons, key=lambda item: (
+        item.current.observation.company_id,
+        item.current.observation.metric,
+        item.current.observation.source,
+        item.current.observation.series_date,
+        item.current.observation.raw_id,
+        item.comparable.observation.raw_id,
+    ))
 
 
 def growth_yoy_by_source(rows: Sequence[EffectiveObservation]) -> list[YoYGrowth]:
     """Calculate legacy-compatible YoY without ever crossing source series."""
-    eligible = [item for item in rows if _growth_input(item)]
     growth = []
-    for current in eligible:
-        comparable = _annual_comparable(current, eligible)
-        if comparable is None:
-            continue
+    comparisons = [
+        comparison
+        for metric in _GROWTH_METRICS
+        for comparison in annual_comparisons_by_source(rows, metric)
+    ]
+    for comparison in comparisons:
+        current = comparison.current
+        comparable = comparison.comparable
         previous = comparable.observation.value
         value = current.observation.value
         if (
