@@ -1,0 +1,107 @@
+{
+  "contract_version": "c-v2.6-compatible-v1",
+  "fixture_version": "aapl-c-dual-run-v1",
+  "ticker": "AAPL",
+  "company_id": 1,
+  "baseline_date": "2026-09-03",
+  "fundamental_contract": {
+    "inputs": {
+      "latest_eps_yoy_pct": 28.662420382165607,
+      "previous_eps_yoy_pct": 21.818181818181817,
+      "eps_acceleration_pp": 6.844238563983787,
+      "latest_revenue_yoy_pct": 16.356501765281383,
+      "previous_revenue_yoy_pct": 16.595182415922984,
+      "revenue_acceleration_pp": -0.23868065064160418,
+      "latest_eps": 2.02,
+      "eps_yoy_pct": [
+        {"date": "2025-03-29", "value": 7.8431372549019605},
+        {"date": "2025-06-28", "value": 12.142857142857142},
+        {"date": "2025-12-27", "value": 18.333333333333332},
+        {"date": "2026-03-28", "value": 21.818181818181817},
+        {"date": "2026-06-27", "value": 28.662420382165607}
+      ],
+      "eps_loss_to_profit": false
+    }
+  },
+  "shared_complements": {
+    "shared_for_score_isolation": true,
+    "independently_reconstructed_by_new_architecture": false,
+    "source": "legacy_baseline",
+    "values": {
+      "data_integrity": "VERIFIED",
+      "split_integrity_status": "NO_RECENT_SPLITS"
+    }
+  },
+  "expected_score": {
+    "model_version": "1.2-exp",
+    "raw_points": 59.55,
+    "available_points": 95.0,
+    "normalized_score": 62.69,
+    "class": "ACCEPTABLE",
+    "status": "OK",
+    "usability": "C_SCORE_USABLE",
+    "components": {
+      "eps_growth": {"points": 21.46496815286624, "max": 35.0, "available": true},
+      "eps_acceleration": {"points": 7.368847712796759, "max": 10.0, "available": true},
+      "eps_trend_quality": {"points": 7.0, "max": 10.0, "available": true},
+      "sales_growth": {"points": 12.81390105916883, "max": 20.0, "available": true},
+      "sales_acceleration": {"points": 5.904527739743356, "max": 10.0, "available": true},
+      "persistence": {"points": 5.0, "max": 10.0, "available": true},
+      "eps_surprise": {"points": null, "max": 5.0, "available": false, "status": "UNVERIFIED"}
+    },
+    "diagnostic": [],
+    "c_flags": [],
+    "classic": {
+      "eps_yoy_ge_25": true,
+      "sales_growth_strong": false,
+      "eps_accelerating": true,
+      "sales_accelerating": false,
+      "result": "PASS"
+    },
+    "surprise_policy": "EXCLUDED_UNTIL_VERIFIED",
+    "low_persistence_policy": {
+      "review": false,
+      "score_threshold": 70.0,
+      "persistence_max": 2.0,
+      "base_effect": false
+    },
+    "small_base": {
+      "risk": false,
+      "inferred_previous_eps": 1.57,
+      "eps_threshold": 0.1,
+      "yoy_threshold_pct": 100.0,
+      "score_penalty": 0.0
+    }
+  },
+  "provenance": {
+    "legacy_baseline": {
+      "path": "fixtures/aapl_c_v26_baseline.json",
+      "contract_version": "c-v2.6-compatible-v1",
+      "algorithm_version": "2.6-exp",
+      "score_model_version": "1.2-exp",
+      "baseline_date": "2026-09-03"
+    },
+    "effective_fundamentals": {
+      "adapter": "database.c_fundamentals_adapter.build_c_fundamental_report",
+      "selection_policy_version": "c-v2.6-compatible-v1"
+    },
+    "input_lineage": {
+      "latest_eps_yoy_pct": {"current_date": "2026-06-27", "comparable_date": "2025-06-28", "source": "SEC", "source_variant": "sec.company_facts"},
+      "previous_eps_yoy_pct": {"current_date": "2026-03-28", "comparable_date": "2025-03-29", "source": "SEC", "source_variant": "sec.company_facts"},
+      "eps_acceleration_pp": {"current_date": "2026-06-27", "previous_date": "2026-03-28", "source": "SEC", "source_variant": "sec.company_facts"},
+      "latest_revenue_yoy_pct": {"current_date": "2026-06-27", "comparable_date": "2025-06-28", "source": "SEC", "source_variant": "sec.company_facts"},
+      "previous_revenue_yoy_pct": {"current_date": "2026-03-28", "comparable_date": "2025-03-29", "source": "SEC", "source_variant": "sec.company_facts"},
+      "revenue_acceleration_pp": {"current_date": "2026-06-27", "previous_date": "2026-03-28", "source": "SEC", "source_variant": "sec.company_facts"},
+      "latest_eps": {"current_date": "2026-06-27", "source": "SEC", "source_variant": "sec.company_facts"},
+      "eps_yoy_pct": {"first_date": "2025-03-29", "last_date": "2026-06-27", "source": "SEC", "source_variant": "sec.company_facts"},
+      "eps_loss_to_profit": {"current_date": "2026-06-27", "comparable_date": "2025-06-28", "source": "SEC", "source_variant": "sec.company_facts"}
+    }
+  },
+  "semantic_gaps": {
+    "data_integrity": "SHARED_LEGACY_COMPLEMENT",
+    "split_integrity_status": "SHARED_LEGACY_COMPLEMENT",
+    "splits_persisted_in_new_architecture": false,
+    "new_quality_semantics_equal_legacy_data_integrity": false,
+    "proves_end_to_end_integrity_split_equivalence": false
+  }
+}
