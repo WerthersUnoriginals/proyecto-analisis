@@ -2,7 +2,8 @@
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from fractions import Fraction
 from itertools import combinations
 from typing import Sequence
@@ -30,6 +31,27 @@ class EffectiveObservation:
     selection_policy_version: str
     selection_reason: str
     comparison: ComparisonDiagnostic
+
+
+@dataclass(frozen=True)
+class YoYGrowth:
+    current: EffectiveObservation
+    comparable: EffectiveObservation
+    company_id: int
+    metric: str
+    source: str
+    current_series_date: date
+    comparable_series_date: date
+    current_value: Decimal
+    comparable_value: Decimal
+    yoy_pct: Decimal
+
+
+@dataclass(frozen=True)
+class GrowthAcceleration:
+    latest_yoy: YoYGrowth
+    previous_yoy: YoYGrowth | None
+    acceleration_pp: Decimal | None
 
 
 # Exact evidence aliases, scoped to their dataset. No substring inference.
@@ -261,4 +283,109 @@ def select_effective_observations(
         effective.observation.company_id, effective.observation.metric,
         effective.observation.series_date, effective.observation.source_variant,
         effective.observation.raw_id,
+    ))
+
+
+_GROWTH_METRICS = {"EPS_DILUTED", "REVENUE", "NET_INCOME"}
+
+
+def _growth_input(item):
+    observation = item.observation
+    return (
+        item.selection_policy_version == SELECTION_POLICY_VERSION
+        and observation.metric in _GROWTH_METRICS
+        and observation.source in {"SEC", "YAHOO"}
+        and observation.observation_kind == "REPORTED"
+        and observation.normalizer_version == (
+            SEC_NORMALIZER_V2 if observation.source == "SEC" else YAHOO_NORMALIZER_V2
+        )
+    )
+
+
+def _annual_comparable(current, rows):
+    target = date.fromordinal(
+        current.observation.series_date.toordinal() - 365
+    )
+    candidates = [
+        item for item in rows
+        if item is not current
+        and item.observation.company_id == current.observation.company_id
+        and item.observation.metric == current.observation.metric
+        and item.observation.source == current.observation.source
+        and abs((item.observation.series_date - target).days) <= 45
+    ]
+    if not candidates:
+        return None
+    distance = min(abs((item.observation.series_date - target).days) for item in candidates)
+    nearest = [
+        item for item in candidates
+        if abs((item.observation.series_date - target).days) == distance
+    ]
+    return nearest[0] if len(nearest) == 1 else None
+
+
+def growth_yoy_by_source(rows: Sequence[EffectiveObservation]) -> list[YoYGrowth]:
+    """Calculate legacy-compatible YoY without ever crossing source series."""
+    eligible = [item for item in rows if _growth_input(item)]
+    growth = []
+    for current in eligible:
+        comparable = _annual_comparable(current, eligible)
+        if comparable is None:
+            continue
+        previous = comparable.observation.value
+        value = current.observation.value
+        if (
+            not previous.is_finite() or not value.is_finite()
+            or previous <= 0
+        ):
+            continue
+        yoy_pct = (value / previous - Decimal("1")) * Decimal("100")
+        growth.append(YoYGrowth(
+            current=current,
+            comparable=comparable,
+            company_id=current.observation.company_id,
+            metric=current.observation.metric,
+            source=current.observation.source,
+            current_series_date=current.observation.series_date,
+            comparable_series_date=comparable.observation.series_date,
+            current_value=value,
+            comparable_value=previous,
+            yoy_pct=yoy_pct,
+        ))
+    return sorted(growth, key=lambda item: (
+        item.company_id, item.metric, item.source, item.current_series_date,
+        item.current.observation.raw_id, item.comparable.observation.raw_id,
+    ))
+
+
+def growth_acceleration_by_source(rows: Sequence[YoYGrowth]) -> list[GrowthAcceleration]:
+    """Return each source/metric's latest YoY and its immediate prior quarter."""
+    groups = defaultdict(list)
+    for item in rows:
+        groups[(item.company_id, item.metric, item.source)].append(item)
+    trends = []
+    for key, group in groups.items():
+        dates = sorted({item.current_series_date for item in group})
+        latest_date = dates[-1]
+        latest = [item for item in group if item.current_series_date == latest_date]
+        if len(latest) != 1:
+            continue
+        previous = None
+        if len(dates) >= 2:
+            previous_date = dates[-2]
+            candidates = [item for item in group if item.current_series_date == previous_date]
+            gap = (latest_date - previous_date).days
+            if len(candidates) == 1 and 70 <= gap <= 120:
+                previous = candidates[0]
+        trends.append(GrowthAcceleration(
+            latest_yoy=latest[0],
+            previous_yoy=previous,
+            acceleration_pp=(
+                None if previous is None else latest[0].yoy_pct - previous.yoy_pct
+            ),
+        ))
+    return sorted(trends, key=lambda item: (
+        item.latest_yoy.company_id,
+        item.latest_yoy.metric,
+        item.latest_yoy.source,
     ))

@@ -8,7 +8,15 @@ from itertools import permutations
 from decimal import Decimal
 
 from database.normalized_fundamentals import NormalizedObservation
-from database.effective_fundamentals import compare_observations, select_effective_observations
+from database.effective_fundamentals import (
+    ComparisonDiagnostic,
+    EffectiveObservation,
+    YoYGrowth,
+    compare_observations,
+    growth_acceleration_by_source,
+    growth_yoy_by_source,
+    select_effective_observations,
+)
 
 
 def observation(source, value="100", **changes):
@@ -348,6 +356,174 @@ class SelectionTests(unittest.TestCase):
         negative = replace(zero, id=103, raw_id=3, value=Decimal("-1"))
         for order in permutations([zero, positive, negative]):
             self.assertEqual(select_effective_observations(order), [])
+
+
+def effective(source, series_date, value="100", metric="EPS_DILUTED", row_id=1):
+    source_variant = "sec.company_facts" if source == "SEC" else (
+        "yfinance.quarterly_income_stmt"
+        if metric in {"EPS_BASIC", "EPS_UNSPECIFIED"}
+        else "yahoo.fundamentals_timeseries"
+    )
+    normalized = observation(
+        source,
+        value,
+        id=row_id,
+        raw_id=row_id,
+        metric=metric,
+        source_variant=source_variant,
+        unit="USD" if metric in {"REVENUE", "NET_INCOME"} else (
+            "shares" if metric == "DILUTED_SHARES" else "USD/shares"
+        ),
+        source_unit="USD" if metric in {"REVENUE", "NET_INCOME"} else (
+            "shares" if metric == "DILUTED_SHARES" else "USD/shares"
+        ),
+        currency=None if metric == "DILUTED_SHARES" else "USD",
+        source_metric_name={
+            "EPS_DILUTED": "EarningsPerShareDiluted" if source == "SEC" else "quarterlyDilutedEPS",
+            "EPS_BASIC": "EarningsPerShareBasic" if source == "SEC" else "Basic EPS",
+            "EPS_UNSPECIFIED": "legacy.unknown",
+            "REVENUE": "RevenueFromContractWithCustomerExcludingAssessedTax" if source == "SEC" else "quarterlyTotalRevenue",
+            "NET_INCOME": "NetIncomeLoss" if source == "SEC" else "quarterlyNetIncome",
+            "DILUTED_SHARES": "WeightedAverageNumberOfDilutedSharesOutstanding",
+        }[metric],
+        source_period_start=(series_date - timedelta(days=90)) if source == "SEC" else None,
+        source_period_end=series_date,
+        canonical_period_end=series_date,
+        series_date=series_date,
+        alignment_days=0,
+        intrinsic_quality_status=("REVIEW_REQUIRED" if metric == "EPS_UNSPECIFIED" else "OK"),
+        selection_eligibility=("INELIGIBLE" if metric == "EPS_UNSPECIFIED" else "ELIGIBLE"),
+    )
+    return EffectiveObservation(
+        normalized,
+        "c-v2.6-compatible-v1",
+        "TEST_EFFECTIVE",
+        ComparisonDiagnostic("NOT_COMPARED", (), None, None, "sec-yahoo-comparison-v1"),
+    )
+
+
+class GrowthTests(unittest.TestCase):
+    def test_yoy_is_calculated_only_within_each_source(self):
+        prior = date(2024, 6, 30)
+        current = date(2025, 6, 30)
+        for source in ("SEC", "YAHOO"):
+            rows = [effective(source, prior, "100", row_id=1), effective(source, current, "120", row_id=2)]
+            growth = growth_yoy_by_source(rows)
+            self.assertEqual(len(growth), 1)
+            self.assertEqual(growth[0].source, source)
+            self.assertEqual(growth[0].yoy_pct, Decimal("20"))
+        self.assertEqual(growth_yoy_by_source([
+            effective("YAHOO", prior, row_id=3), effective("SEC", current, "120", row_id=4)
+        ]), [])
+        self.assertEqual(growth_yoy_by_source([
+            effective("SEC", prior, row_id=5), effective("YAHOO", current, "120", row_id=6)
+        ]), [])
+
+    def test_annual_window_exact_45_included_and_46_excluded(self):
+        current = date(2025, 6, 30)
+        target = current - timedelta(days=365)
+        for offset in (0, -45, 45):
+            rows = [effective("SEC", target + timedelta(days=offset), row_id=1), effective("SEC", current, "120", row_id=2)]
+            self.assertEqual(growth_yoy_by_source(rows)[0].yoy_pct, Decimal("20"))
+        for offset in (-46, 46):
+            rows = [effective("SEC", target + timedelta(days=offset), row_id=1), effective("SEC", current, "120", row_id=2)]
+            self.assertEqual(growth_yoy_by_source(rows), [])
+
+    def test_annual_comparable_is_deterministic_and_material_tie_is_omitted(self):
+        current = effective("SEC", date(2025, 6, 30), "120", row_id=3)
+        near = effective("SEC", date(2024, 6, 29), "100", row_id=1)
+        farther = effective("SEC", date(2024, 6, 20), "90", row_id=2)
+        expected = growth_yoy_by_source([current, near, farther])
+        self.assertEqual(expected, growth_yoy_by_source([farther, near, current]))
+        self.assertEqual(expected[0].comparable.observation.id, 1)
+        left = effective("SEC", date(2024, 6, 20), "100", row_id=4)
+        right = effective("SEC", date(2024, 7, 10), "100", row_id=5)
+        for rows in ((left, current, right), (right, current, left)):
+            self.assertEqual(growth_yoy_by_source(rows), [])
+
+    def test_only_c_growth_metrics_are_accepted(self):
+        for metric in ("EPS_DILUTED", "REVENUE", "NET_INCOME"):
+            rows = [effective("SEC", date(2024, 6, 30), metric=metric, row_id=1), effective("SEC", date(2025, 6, 30), "120", metric, 2)]
+            self.assertEqual(len(growth_yoy_by_source(rows)), 1)
+        for metric in ("DILUTED_SHARES", "EPS_BASIC", "EPS_UNSPECIFIED"):
+            source = "YAHOO" if metric == "EPS_UNSPECIFIED" else "SEC"
+            rows = [effective(source, date(2024, 6, 30), metric=metric, row_id=1), effective(source, date(2025, 6, 30), "120", metric, 2)]
+            self.assertEqual(growth_yoy_by_source(rows), [])
+
+    def test_legacy_numeric_semantics_require_positive_previous_only(self):
+        cases = (
+            ("100", "120", Decimal("20")),
+            ("100", "-50", Decimal("-150")),
+            ("100", "0", Decimal("-100")),
+            ("-50", "100", None),
+            ("0", "100", None),
+        )
+        for previous, current, expected in cases:
+            with self.subTest(previous=previous, current=current):
+                result = growth_yoy_by_source([
+                    effective("SEC", date(2024, 6, 30), previous, row_id=1),
+                    effective("SEC", date(2025, 6, 30), current, row_id=2),
+                ])
+                self.assertEqual(None if not result else result[0].yoy_pct, expected)
+
+    def growth(self, current_date, pct, source="SEC", metric="EPS_DILUTED", row_id=10):
+        prior = effective(source, current_date - timedelta(days=365), "100", metric, row_id)
+        current = effective(source, current_date, str(Decimal("100") + Decimal(str(pct))), metric, row_id + 1)
+        return growth_yoy_by_source([prior, current])[0]
+
+    def test_previous_yoy_boundaries_and_outside_window(self):
+        previous = self.growth(date(2025, 3, 1), 22, row_id=10)
+        for days in (70, 120):
+            latest = self.growth(previous.current_series_date + timedelta(days=days), 28, row_id=20)
+            trend = growth_acceleration_by_source([latest, previous])[0]
+            self.assertIs(trend.previous_yoy, previous)
+            self.assertEqual(trend.acceleration_pp, Decimal("6"))
+        for days in (69, 121):
+            latest = self.growth(previous.current_series_date + timedelta(days=days), 28, row_id=30)
+            trend = growth_acceleration_by_source([previous, latest])[0]
+            self.assertIsNone(trend.previous_yoy)
+            self.assertIsNone(trend.acceleration_pp)
+
+    def test_previous_yoy_never_crosses_source_or_metric(self):
+        previous = self.growth(date(2025, 3, 1), 22, row_id=10)
+        for latest in (
+            self.growth(date(2025, 6, 1), 28, source="YAHOO", row_id=20),
+            self.growth(date(2025, 6, 1), 28, metric="REVENUE", row_id=30),
+        ):
+            trends = growth_acceleration_by_source([previous, latest])
+            self.assertTrue(all(item.previous_yoy is None for item in trends))
+
+    def test_acceleration_positive_negative_zero_and_absent(self):
+        for previous_pct, latest_pct, expected in ((22, 28, Decimal("6")), (28, 22, Decimal("-6")), (22, 22, Decimal("0"))):
+            previous = self.growth(date(2025, 3, 1), previous_pct, row_id=10)
+            latest = self.growth(date(2025, 6, 1), latest_pct, row_id=20)
+            trend = growth_acceleration_by_source([latest, previous])[0]
+            self.assertEqual(trend.acceleration_pp, expected)
+        only = self.growth(date(2025, 6, 1), 28, row_id=40)
+        self.assertIsNone(growth_acceleration_by_source([only])[0].acceleration_pp)
+
+    def test_growth_and_acceleration_are_deterministic_and_inputs_immutable(self):
+        rows = [
+            effective("SEC", date(2024, 3, 1), "100", row_id=1),
+            effective("SEC", date(2025, 3, 1), "122", row_id=2),
+            effective("SEC", date(2024, 6, 1), "100", row_id=3),
+            effective("SEC", date(2025, 6, 1), "128", row_id=4),
+        ]
+        before = deepcopy([asdict(item) for item in rows])
+        growth = growth_yoy_by_source(rows)
+        self.assertEqual(growth, growth_yoy_by_source(list(reversed(rows))))
+        self.assertEqual(growth_acceleration_by_source(growth), growth_acceleration_by_source(list(reversed(growth))))
+        self.assertEqual([asdict(item) for item in rows], before)
+
+    def test_traceability_fields_point_to_current_and_comparable(self):
+        prior = effective("SEC", date(2024, 6, 30), "100", row_id=7)
+        current = effective("SEC", date(2025, 6, 30), "120", row_id=8)
+        growth = growth_yoy_by_source([prior, current])[0]
+        self.assertIsInstance(growth, YoYGrowth)
+        self.assertIs(growth.current, current)
+        self.assertIs(growth.comparable, prior)
+        self.assertEqual((growth.company_id, growth.metric, growth.source), (1, "EPS_DILUTED", "SEC"))
+        self.assertEqual((growth.current_value, growth.comparable_value), (Decimal("120"), Decimal("100")))
 
 
 if __name__ == "__main__":
