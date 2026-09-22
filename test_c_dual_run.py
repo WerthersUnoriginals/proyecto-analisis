@@ -111,6 +111,87 @@ class FundamentalContractComparisonTests(unittest.TestCase):
             for item in result["differences"]
         ))
 
+    def test_eps_history_extra_prefix_aligns_by_date_without_cascade(self):
+        legacy = [
+            {"date": "2022-12-31", "value": 10.0},
+            {"date": "2023-04-01", "value": 11.0},
+            {"date": "2023-07-01", "value": 12.0},
+            {"date": "2023-09-30", "value": 13.0},
+            {"date": "2023-12-30", "value": 14.0},
+        ]
+        persisted = [
+            {"date": "2021-12-25", "value": 1.0},
+            {"date": "2022-03-26", "value": 2.0},
+            {"date": "2022-06-25", "value": 3.0},
+            *legacy,
+        ]
+        result = compare_fundamental_contract(
+            {"eps_yoy_pct": legacy}, {"eps_yoy_pct": persisted},
+        )["fields"]["eps_yoy_pct"]
+        self.assertEqual(result["full_history_diagnostic"]["common_count"], 5)
+        self.assertEqual(result["full_history_diagnostic"]["persisted_only_dates"], [
+            "2021-12-25", "2022-03-26", "2022-06-25",
+        ])
+        self.assertEqual(result["full_history_diagnostic"]["common_differences"], [])
+        self.assertTrue(result["score_relevant_history"]["equivalent"])
+
+    def test_eps_history_same_date_noise_and_real_difference_use_tolerance(self):
+        legacy = [{"date": "2025-06-28", "value": 10.0}]
+        noisy = [{"date": "2025-06-28", "value": 10.000000005}]
+        changed = [{"date": "2025-06-28", "value": 11.0}]
+        noisy_result = compare_fundamental_contract(
+            {"eps_yoy_pct": legacy}, {"eps_yoy_pct": noisy},
+        )["fields"]["eps_yoy_pct"]
+        changed_result = compare_fundamental_contract(
+            {"eps_yoy_pct": legacy}, {"eps_yoy_pct": changed},
+        )["fields"]["eps_yoy_pct"]
+        self.assertEqual(noisy_result["full_history_diagnostic"]["common_differences"][0]["status"], "NUMERIC_EQUIVALENT")
+        self.assertEqual(changed_result["full_history_diagnostic"]["common_differences"][0]["status"], "NUMERIC_DIFFERENCE")
+
+    def test_eps_history_extras_duplicates_order_and_score_window_are_explicit(self):
+        base = [
+            {"date": "2024-01-01", "value": 1.0},
+            {"date": "2024-04-01", "value": 2.0},
+            {"date": "2024-07-01", "value": 30.0},
+            {"date": "2024-10-01", "value": 35.0},
+            {"date": "2025-01-01", "value": 40.0},
+            {"date": "2025-04-01", "value": 45.0},
+        ]
+        old_extra = [{"date": "2023-01-01", "value": 99.0}]
+        result = compare_fundamental_contract(
+            {"eps_yoy_pct": base}, {"eps_yoy_pct": old_extra + base},
+        )["fields"]["eps_yoy_pct"]
+        self.assertTrue(result["score_relevant_history"]["equivalent"])
+        self.assertFalse(result["full_history_diagnostic"]["equivalent"])
+        self.assertIn("EXCLUSIVE_PERSISTED", {
+            item["status"] for item in compare_fundamental_contract(
+                {"eps_yoy_pct": base}, {"eps_yoy_pct": old_extra},
+            )["differences"]
+        })
+
+        changed_tail = base[:-1] + [{"date": "2025-04-01", "value": 46.0}]
+        changed = compare_fundamental_contract(
+            {"eps_yoy_pct": base}, {"eps_yoy_pct": changed_tail},
+        )["fields"]["eps_yoy_pct"]
+        self.assertFalse(changed["score_relevant_history"]["equivalent"])
+
+        duplicate = base + [{"date": "2025-04-01", "value": 45.0}]
+        duplicate_result = compare_fundamental_contract(
+            {"eps_yoy_pct": base}, {"eps_yoy_pct": duplicate},
+        )["fields"]["eps_yoy_pct"]
+        self.assertTrue(duplicate_result["full_history_diagnostic"]["duplicate_dates"]["new"])
+
+    def test_eps_history_short_series_keeps_legacy_score_window_semantics(self):
+        short = [
+            {"date": "2025-01-01", "value": 30.0},
+            {"date": "2025-04-01", "value": 35.0},
+        ]
+        result = compare_fundamental_contract(
+            {"eps_yoy_pct": short}, {"eps_yoy_pct": short},
+        )["fields"]["eps_yoy_pct"]
+        self.assertEqual(result["score_relevant_history"]["legacy_count"], 2)
+        self.assertEqual(result["score_relevant_history"]["persisted_count"], 2)
+
     def test_missing_field_and_loss_to_profit_change_are_explicit(self):
         missing = copy.deepcopy(self.baseline)
         del missing["previous_revenue_yoy_pct"]

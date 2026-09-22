@@ -106,6 +106,114 @@ def _scalar_comparison(field: str, legacy_present: bool, legacy, new_present: bo
     return _exact_comparison(field, legacy, new)
 
 
+def _history_record_comparison(path: str, legacy_record, new_record) -> tuple[dict, list[dict]]:
+    """Compare one date-aligned history pair using the central tolerance policy."""
+    if not isinstance(legacy_record, dict) or not isinstance(new_record, dict):
+        comparison = _exact_comparison(path, legacy_record, new_record)
+        return comparison, [] if comparison["equivalent"] else [comparison]
+    if "date" not in legacy_record or "date" not in new_record:
+        date = _missing_comparison(
+            f"{path}.date", "date" in legacy_record, legacy_record.get("date"),
+            "date" in new_record, new_record.get("date"),
+        )
+    else:
+        date = _exact_comparison(f"{path}.date", legacy_record["date"], new_record["date"], "DATE_DIFFERENCE")
+    if "value" not in legacy_record or "value" not in new_record:
+        value = _missing_comparison(
+            f"{path}.value", "value" in legacy_record, legacy_record.get("value"),
+            "value" in new_record, new_record.get("value"),
+        )
+    elif (
+        isinstance(legacy_record["value"], Real) and not isinstance(legacy_record["value"], bool)
+        and isinstance(new_record["value"], Real) and not isinstance(new_record["value"], bool)
+    ):
+        value = _numeric_comparison(f"{path}.value", legacy_record["value"], new_record["value"], "yoy_pct")
+    else:
+        value = _exact_comparison(f"{path}.value", legacy_record["value"], new_record["value"])
+    equivalent = date["equivalent"] and value["equivalent"]
+    status = "EXACT" if date["status"] == "EXACT" and value["status"] == "EXACT" else (
+        "NUMERIC_EQUIVALENT" if date["status"] == "EXACT" and value["equivalent"] else "SEMANTIC_DIFFERENCE"
+    )
+    record = {"path": path, "status": status, "equivalent": equivalent, "date": date, "value": value}
+    return record, [item for item in (date, value) if item["status"] != "EXACT"]
+
+
+def _history_by_date(items: list) -> tuple[dict, list]:
+    by_date = {}
+    duplicates = []
+    for item in items:
+        key = item.get("date") if isinstance(item, dict) else None
+        if key in by_date:
+            duplicates.append(key)
+        else:
+            by_date[key] = item
+    return by_date, duplicates
+
+
+def _score_relevant_history(legacy: list, new: list) -> tuple[dict, list[dict]]:
+    legacy_tail, new_tail = legacy[-4:], new[-4:]
+    comparison, differences = _series_comparison_core(legacy_tail, new_tail, align_by_date=False)
+    comparison.update({"legacy_count": len(legacy_tail), "persisted_count": len(new_tail)})
+    return comparison, differences
+
+
+def _series_comparison_core(legacy: list, new: list, *, align_by_date: bool) -> tuple[dict, list[dict]]:
+    field = "eps_yoy_pct"
+    differences = []
+    records = []
+    if align_by_date:
+        legacy_by_date, legacy_duplicates = _history_by_date(legacy)
+        new_by_date, new_duplicates = _history_by_date(new)
+        common_dates = sorted(set(legacy_by_date) & set(new_by_date), key=lambda value: str(value))
+        legacy_only = sorted(set(legacy_by_date) - set(new_by_date), key=lambda value: str(value))
+        new_only = sorted(set(new_by_date) - set(legacy_by_date), key=lambda value: str(value))
+        for key in common_dates:
+            record, record_differences = _history_record_comparison(
+                f"{field}[date={key}]", legacy_by_date[key], new_by_date[key],
+            )
+            records.append(record)
+            differences.extend(record_differences)
+        for key in legacy_only:
+            item = {"field": f"{field}[date={key}]", "legacy": legacy_by_date[key], "new": None,
+                    "status": "EXCLUSIVE_LEGACY", "equivalent": False}
+            differences.append(item)
+        for key in new_only:
+            item = {"field": f"{field}[date={key}]", "legacy": None, "new": new_by_date[key],
+                    "status": "EXCLUSIVE_PERSISTED", "equivalent": False}
+            differences.append(item)
+        order_changed = [item.get("date") for item in legacy if isinstance(item, dict)] != [item.get("date") for item in new if isinstance(item, dict)]
+        diagnostic = {
+            "common_count": len(common_dates),
+            "legacy_only_dates": legacy_only,
+            "persisted_only_dates": new_only,
+            "common_differences": [item for item in differences if "date=" in item.get("field", "") and item.get("status") not in {"EXCLUSIVE_LEGACY", "EXCLUSIVE_PERSISTED"}],
+            "duplicate_dates": {"legacy": legacy_duplicates, "new": new_duplicates},
+            "order_changed": order_changed,
+            "equivalent": all(item["equivalent"] for item in differences)
+            and not legacy_duplicates and not new_duplicates and not order_changed,
+        }
+        status = "EXACT" if diagnostic["equivalent"] and not differences else (
+            "NUMERIC_EQUIVALENT" if diagnostic["equivalent"] else "SEMANTIC_DIFFERENCE"
+        )
+        return {"field": field, "legacy": legacy, "new": new, "status": status,
+                "equivalent": diagnostic["equivalent"], "records": records, "full_history_diagnostic": diagnostic}, differences
+
+    for index in range(max(len(legacy), len(new))):
+        if index >= len(legacy) or index >= len(new):
+            item = {"field": f"{field}[{index}]", "legacy": legacy[index] if index < len(legacy) else None,
+                    "new": new[index] if index < len(new) else None,
+                    "status": "EXCLUSIVE_LEGACY" if index < len(legacy) else "EXCLUSIVE_PERSISTED", "equivalent": False}
+            differences.append(item)
+            continue
+        record, record_differences = _history_record_comparison(f"{field}[{index}]", legacy[index], new[index])
+        record["index"] = index
+        records.append(record)
+        differences.extend(record_differences)
+    equivalent = all(item["equivalent"] for item in differences)
+    status = "EXACT" if equivalent and legacy == new else "NUMERIC_EQUIVALENT" if equivalent else "SEMANTIC_DIFFERENCE"
+    return {"field": field, "legacy": legacy, "new": new, "status": status, "equivalent": equivalent, "records": records}, differences
+
+
 def _series_comparison(legacy_present: bool, legacy, new_present: bool, new) -> tuple[dict, list[dict]]:
     field = "eps_yoy_pct"
     if not legacy_present or not new_present:
@@ -115,111 +223,31 @@ def _series_comparison(legacy_present: bool, legacy, new_present: bool, new) -> 
         comparison = _exact_comparison(field, legacy, new)
         return comparison, [] if comparison["equivalent"] else [comparison]
 
-    differences = []
-    records = []
-    legacy_serialized = Counter(json.dumps(item, sort_keys=True) for item in legacy)
-    new_serialized = Counter(json.dumps(item, sort_keys=True) for item in new)
-    if legacy != new and legacy_serialized == new_serialized:
-        differences.append({
-            "field": field,
-            "legacy": legacy,
-            "new": new,
-            "status": "SEMANTIC_DIFFERENCE",
-            "reason": "ORDER_DIFFERENCE",
-            "equivalent": False,
-        })
-
-    for index in range(max(len(legacy), len(new))):
-        legacy_exists = index < len(legacy)
-        new_exists = index < len(new)
-        path = f"{field}[{index}]"
-        if not legacy_exists or not new_exists:
-            missing = _missing_comparison(
-                path,
-                legacy_exists,
-                legacy[index] if legacy_exists else None,
-                new_exists,
-                new[index] if new_exists else None,
-            )
-            records.append({"index": index, "status": missing["status"], "equivalent": False})
-            differences.append(missing)
-            continue
-
-        legacy_record = legacy[index]
-        new_record = new[index]
-        if not isinstance(legacy_record, dict) or not isinstance(new_record, dict):
-            semantic = _exact_comparison(path, legacy_record, new_record)
-            records.append({"index": index, "status": semantic["status"], "equivalent": semantic["equivalent"]})
-            if not semantic["equivalent"]:
-                differences.append(semantic)
-            continue
-
-        date = _missing_comparison(
-            f"{path}.date",
-            "date" in legacy_record,
-            legacy_record.get("date"),
-            "date" in new_record,
-            new_record.get("date"),
-        ) if "date" not in legacy_record or "date" not in new_record else _exact_comparison(
-            f"{path}.date",
-            legacy_record["date"],
-            new_record["date"],
-            "DATE_DIFFERENCE",
-        )
-        value = _missing_comparison(
-            f"{path}.value",
-            "value" in legacy_record,
-            legacy_record.get("value"),
-            "value" in new_record,
-            new_record.get("value"),
-        ) if "value" not in legacy_record or "value" not in new_record else (
-            _numeric_comparison(
-                f"{path}.value",
-                legacy_record["value"],
-                new_record["value"],
-                "yoy_pct",
-            )
-            if isinstance(legacy_record["value"], Real)
-            and not isinstance(legacy_record["value"], bool)
-            and isinstance(new_record["value"], Real)
-            and not isinstance(new_record["value"], bool)
-            else _exact_comparison(f"{path}.value", legacy_record["value"], new_record["value"])
-        )
-        record_equivalent = date["equivalent"] and value["equivalent"]
-        record_status = (
-            "EXACT"
-            if date["status"] == "EXACT" and value["status"] == "EXACT"
-            else "NUMERIC_EQUIVALENT"
-            if date["status"] == "EXACT" and value["equivalent"]
-            else "SEMANTIC_DIFFERENCE"
-        )
-        records.append({
-            "index": index,
-            "status": record_status,
-            "equivalent": record_equivalent,
-            "date": date,
-            "value": value,
-        })
-        for comparison in (date, value):
-            if comparison["status"] != "EXACT":
-                differences.append(comparison)
-
-    equivalent = not any(not item["equivalent"] for item in differences)
-    status = (
-        "EXACT"
-        if not differences
-        else "NUMERIC_EQUIVALENT"
-        if equivalent
-        else "SEMANTIC_DIFFERENCE"
-    )
-    return {
-        "field": field,
-        "legacy": legacy,
-        "new": new,
-        "status": status,
-        "equivalent": equivalent,
-        "records": records,
-    }, differences
+    full, differences = _series_comparison_core(legacy, new, align_by_date=True)
+    score_relevant, _score_differences = _score_relevant_history(legacy, new)
+    # Preserve the legacy positional record shape only for equal-length inputs;
+    # unequal histories must never manufacture index-shift cascades.
+    if len(legacy) == len(new):
+        positional, positional_differences = _series_comparison_core(legacy, new, align_by_date=False)
+        full["records"] = positional["records"]
+        # Retain explicit positional date/value evidence for equal-length
+        # histories whose identities changed; this is compatibility metadata,
+        # not the alignment strategy used for unequal histories.
+        if [item.get("date") for item in legacy if isinstance(item, dict)] != [item.get("date") for item in new if isinstance(item, dict)]:
+            differences.extend(positional_differences)
+        legacy_serialized = Counter(json.dumps(item, sort_keys=True) for item in legacy)
+        new_serialized = Counter(json.dumps(item, sort_keys=True) for item in new)
+        if legacy_serialized == new_serialized and legacy != new:
+            differences.append({
+                "field": field,
+                "legacy": legacy,
+                "new": new,
+                "status": "SEMANTIC_DIFFERENCE",
+                "reason": "ORDER_DIFFERENCE",
+                "equivalent": False,
+            })
+    full["score_relevant_history"] = score_relevant
+    return full, differences
 
 
 def _provenance_comparison(legacy: Optional[dict], new: Optional[dict]) -> dict:
