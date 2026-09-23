@@ -123,6 +123,9 @@ def _json_safe_dates(value):
 
 def _strong_identifier(evidence: Mapping):
     if evidence.get("source") == "SEC":
+        identity_type = evidence.get("source_identity_type")
+        if identity_type is not None and identity_type != "SEC_ACCESSION":
+            return None
         return evidence.get("source_record_id")
     if evidence.get("source") == "YAHOO" and evidence.get("identity_is_immutable") is True:
         return (

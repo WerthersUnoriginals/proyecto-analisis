@@ -137,7 +137,7 @@ def _evidence(row, **overrides):
         "selection_reason", "comparison_rules_version", "comparison_status",
         "comparison_reason", "comparison_reference_id",
         "comparison_difference_pct", "alignment_method", "alignment_days",
-        "alignment_reference_id", "source_record_id",
+        "alignment_reference_id", "source_record_id", "source_identity_type",
     )
     result = {key: row[key] for key in fields if key in row}
     result.update(overrides)
@@ -277,6 +277,15 @@ class RunnerContractTests(unittest.TestCase):
             result["classification"]["per_input"]["latest_eps"]["category"],
             "POSSIBLE_REGRESSION",
         )
+
+    def test_persisted_lineage_carries_source_identity_type_without_using_raw_id(self):
+        rows = _rows()
+        for row in rows:
+            if row["source"] == "SEC":
+                row["source_identity_type"] = "SEC_ACCESSION"
+        evidence = _evidence(rows[0])
+        self.assertEqual(evidence["source_identity_type"], "SEC_ACCESSION")
+        self.assertNotEqual(evidence["source_identity_type"], "RAW_ID")
 
     def test_yahoo_without_immutable_revision_is_capture_time_difference(self):
         rows = _rows(source="YAHOO")

@@ -1,6 +1,7 @@
 """Pure contracts plus opt-in, rollback-only PostgreSQL projection equivalence."""
 
 import os
+import re
 import unittest
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, asdict, replace
@@ -95,6 +96,8 @@ class EffectiveCurrentLoaderTests(unittest.TestCase):
         self.assertIn("where company_id = %s", normalized_query)
         self.assertNotIn("17", query)
         self.assertIn("from fundamentals_effective_current", normalized_query)
+        self.assertIn("source_record_id", normalized_query)
+        self.assertIn("source_identity_type", normalized_query)
         self.assertNotIn("fundamentals_normalized", normalized_query)
         self.assertNotIn("fundamentals_raw", normalized_query)
         self.assertIn(
@@ -103,6 +106,29 @@ class EffectiveCurrentLoaderTests(unittest.TestCase):
         )
         for forbidden in ("insert", "update", "delete", "truncate", "alter", "drop", "create"):
             self.assertNotIn(forbidden, normalized_query.split())
+
+    def test_loader_preserves_source_identity_metadata_in_same_read(self):
+        columns = (
+            "selected_observation_id", "raw_id", "source", "source_record_id",
+            "source_identity_type",
+        )
+        rows = [(101, 7, "SEC", "0000000001-25-000007", "SEC_ACCESSION")]
+        result, connection = self.run_loader(7, columns, rows)
+        self.assertEqual(result[0]["source_record_id"], "0000000001-25-000007")
+        self.assertEqual(result[0]["source_identity_type"], "SEC_ACCESSION")
+        self.assertEqual(len(connection.loader_cursor.calls), 1)
+
+
+class IdentityMigrationStaticTests(unittest.TestCase):
+    def test_identity_migration_contract_is_additive_and_joined_by_raw_id(self):
+        migration = Path(__file__).resolve().parent / "database" / "migrations" / "2026-09-22_fundamentals_effective_identity_v1.sql"
+        self.assertTrue(migration.exists())
+        sql = migration.read_text(encoding="utf-8")
+        self.assertIn("source_record_id", sql)
+        self.assertIn("source_identity_type", sql)
+        self.assertIn("fundamentals_raw", sql)
+        self.assertIn("raw_identity.id = effective.raw_id", sql)
+        self.assertNotIn("DROP VIEW", sql.upper())
 
 
 def observation(source, value="100", **changes):
@@ -975,6 +1001,58 @@ class GrowthTests(unittest.TestCase):
         self.assertIs(growth.comparable, prior)
         self.assertEqual((growth.company_id, growth.metric, growth.source), (1, "EPS_DILUTED", "SEC"))
         self.assertEqual((growth.current_value, growth.comparable_value), (Decimal("120"), Decimal("100")))
+
+
+class IdentityMigrationDebugTests(unittest.TestCase):
+    """Freeze the SQLSTATE 42601 construction defect without touching PostgreSQL."""
+
+    MIGRATION = Path(__file__).parent / "database" / "migrations" / "2026-09-22_fundamentals_effective_identity_v1.sql"
+
+    def test_view_definition_is_normalized_before_subquery_wrapping(self):
+        # PostgreSQL's pg_get_viewdef(..., true) can end in a semicolon.  The
+        # failed migration inserted that value verbatim into FROM (...), which
+        # deterministically produces the invalid token sequence below.
+        body = "WITH source AS (SELECT 1 AS raw_id) SELECT raw_id FROM source"
+        invalid_wrapping = re.compile(r";[\s;]*\)\s+AS\s+effective", re.IGNORECASE)
+        for suffix in (";", "; ", ";\n", ";\r\n", ";   \n\t", ";;;", "; ; \n"):
+            provider_view_definition = body + suffix
+            wrapped = "FROM (" + provider_view_definition + ") AS effective"
+            self.assertRegex(wrapped, invalid_wrapping)
+
+            normalized = re.sub(r"[;\s]+$", "", provider_view_definition)
+            self.assertEqual(normalized, body)
+            corrected_wrapped = "FROM (" + normalized + ") AS effective"
+            self.assertNotRegex(corrected_wrapped, invalid_wrapping)
+            self.assertIn(body, corrected_wrapped)
+
+        whitespace_only = body + " \n\t"
+        normalized = re.sub(r"[;\s]+$", "", whitespace_only)
+        self.assertEqual(normalized, body)
+        self.assertNotRegex("FROM (" + normalized + ") AS effective", invalid_wrapping)
+
+        normalized = re.sub(r"[;\s]+$", "", body + ";")
+        corrected_wrapped = "FROM (" + normalized + ") AS effective"
+        self.assertNotRegex(corrected_wrapped, invalid_wrapping)
+        self.assertIn(body, corrected_wrapped)
+
+        migration = self.MIGRATION.read_text(encoding="utf-8")
+        compact_migration = re.sub(r"\s+", " ", migration)
+        extraction_flow = re.compile(
+            r"SELECT\s+regexp_replace\s*\(\s*"
+            r"pg_get_viewdef\s*\(\s*'public\.fundamentals_effective_current'::regclass\s*,\s*true\s*\)\s*,\s*"
+            r"'\[\[:space:\];\]\+\$'\s*,\s*''\s*\)\s*"
+            r"INTO\s+previous_view_definition",
+            re.IGNORECASE,
+        )
+        self.assertRegex(compact_migration, extraction_flow)
+        self.assertRegex(
+            compact_migration,
+            re.compile(r"FROM\s*\('\s*\|\|\s*previous_view_definition\s*\|\|\s*'\)\s+AS\s+effective", re.IGNORECASE),
+        )
+        self.assertIn("existing_column_count <> 35", compact_migration)
+        self.assertIn("source_record_id", compact_migration)
+        self.assertIn("source_identity_type", compact_migration)
+
 
 
 if __name__ == "__main__":

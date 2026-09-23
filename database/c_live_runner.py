@@ -51,6 +51,7 @@ _EVIDENCE_FIELDS = (
     "provider_revision_id",
     "provider_id",
     "identity_is_immutable",
+    "source_identity_type",
 )
 
 
@@ -182,7 +183,10 @@ def _identity_assessment(rows: Sequence[Mapping] | None) -> dict:
     sec_rows = [row for row in rows if row.get("source") == "SEC"]
     missing_sec_accessions = sum(
         not (
-            row.get("source_record_id") not in (None, "")
+            (
+                row.get("source_record_id") not in (None, "")
+                and row.get("source_identity_type") in (None, "SEC_ACCESSION")
+            )
             or row.get("accession") not in (None, "")
             or row.get("accn") not in (None, "")
         )

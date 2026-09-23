@@ -52,7 +52,9 @@ _LOAD_EFFECTIVE_CURRENT_SQL = """
         comparison_difference_pct,
         alignment_method,
         alignment_days,
-        alignment_reference_id
+        alignment_reference_id,
+        source_record_id,
+        source_identity_type
     FROM fundamentals_effective_current
     WHERE company_id = %s
     ORDER BY company_id, metric, series_date, source_variant, raw_id
