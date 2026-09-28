@@ -625,6 +625,46 @@ def compare_score_equivalence(
     return result
 
 
+def compare_score_equivalence_independent(
+    legacy_fundamentals: dict,
+    independent_fundamentals: dict,
+) -> dict:
+    """Compare C scores with independently reconstructed persisted inputs.
+
+    Unlike the historical fixture comparator this function never copies
+    ``data_integrity`` or ``split_integrity_status`` from the legacy report.
+    """
+    required = {"data_integrity", "split_integrity_status"}
+    if independent_fundamentals.get(
+        "independently_reconstructed_by_new_architecture"
+    ) is not True:
+        raise ValueError("independent C input marker is required")
+    if not required.issubset(independent_fundamentals):
+        raise ValueError("independent C integrity inputs are incomplete")
+    errors = []
+    scores = {}
+    for side, report in (("legacy", legacy_fundamentals), ("new", independent_fundamentals)):
+        try:
+            scores[side] = build_c_score(copy.deepcopy(dict(report)))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            scores[side] = None
+            errors.append({"side": side, "type": type(exc).__name__, "message": str(exc)})
+    if errors:
+        result = {
+            "equivalent": False, "status": "SCORE_EXECUTION_ERROR",
+            "legacy": scores["legacy"], "new": scores["new"],
+            "component_differences": [], "flags_missing": [], "flags_extra": [],
+            "diagnostic_differences": [], "differences": [], "errors": errors,
+        }
+    else:
+        result = _compare_score_results(scores["legacy"], scores["new"])
+        result["status"] = "EQUIVALENT" if result["equivalent"] else "DIFFERENT"
+        result["errors"] = []
+    result["shared_complements"] = None
+    result["independent_inputs"] = True
+    return result
+
+
 def compare_c_dual_run(
     legacy_fundamentals: dict,
     new_fundamentals: dict,

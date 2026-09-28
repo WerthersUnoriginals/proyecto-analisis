@@ -16,7 +16,12 @@ from database.c_dual_run import (
     compare_fundamental_contract,
     compare_score_equivalence,
 )
-from database.c_dual_run_contract import FUNDAMENTAL_INPUT_KEYS
+from database.c_dual_run_contract import (
+    FUNDAMENTAL_INPUT_KEYS,
+    INDEPENDENT_C_INPUT_KEYS,
+)
+from database.c_data_integrity import VALID_DATA_INTEGRITY_STATUSES
+from database.split_integrity import VALID_SPLIT_INTEGRITY_STATUSES
 
 
 IDENTITY_STRENGTHS = ("STRONG", "LOGICAL", "AMBIGUOUS")
@@ -139,6 +144,12 @@ def _strong_identifier(evidence: Mapping):
 def identity_strength(evidence: Mapping) -> str:
     """Return STRONG, LOGICAL, or AMBIGUOUS without inferring absent metadata."""
 
+    if evidence.get("source") == "SEC":
+        identity_type = evidence.get("source_identity_type")
+        if identity_type not in (None, "SEC_ACCESSION"):
+            return "AMBIGUOUS"
+        if evidence.get("source_identity_error"):
+            return "AMBIGUOUS"
     strong_identifier = _strong_identifier(evidence)
     if strong_identifier and all(_present(evidence, key) for key in _STRONG_BASE_FIELDS):
         return "STRONG"
@@ -156,7 +167,14 @@ def identity_strength(evidence: Mapping) -> str:
 
 
 def _strong_key(evidence: Mapping) -> tuple:
-    return tuple(evidence.get(key) for key in _STRONG_BASE_FIELDS) + (
+    values = []
+    for key in _STRONG_BASE_FIELDS:
+        value = evidence.get(key)
+        if key in {"source_period_start", "source_period_end"}:
+            parsed = _parse_date(value)
+            value = parsed.isoformat() if parsed is not None else value
+        values.append(value)
+    return tuple(values) + (
         _strong_identifier(evidence),
     )
 
@@ -186,6 +204,18 @@ def _versions_compatible(first: Mapping, second: Mapping) -> bool:
         and first[key] == second[key]
         for key in _VERSION_FIELDS
     )
+
+
+def _processing_version_status(first: Mapping, second: Mapping) -> str:
+    first_version = first.get("normalizer_version")
+    second_version = second.get("normalizer_version")
+    if first_version and second_version:
+        return "SAME_VERSION" if first_version == second_version else "DIFFERENT_VERSION"
+    if first_version is None and second_version:
+        return "LEGACY_VERSION_UNKNOWN"
+    if first_version and second_version is None:
+        return "PROCESSING_VERSION_UNKNOWN"
+    return "NOT_APPLICABLE"
 
 
 def _identity_token(evidence: Mapping) -> str:
@@ -223,6 +253,18 @@ def compare_evidence_lineage(
         "legacy_strengths": legacy_strengths,
         "persisted_strengths": persisted_strengths,
         "order_changed": order_changed,
+        "processing_version_status": (
+            "SAME_VERSION"
+            if all(
+                _processing_version_status(first, second) == "SAME_VERSION"
+                for first, second in zip(legacy, persisted)
+            )
+            else (
+                _processing_version_status(legacy[0], persisted[0])
+                if len(legacy) == len(persisted) == 1
+                else "MIXED"
+            )
+        ),
     }
     if len(legacy) != len(persisted) or "AMBIGUOUS" in legacy_strengths + persisted_strengths:
         return {
@@ -237,16 +279,17 @@ def compare_evidence_lineage(
         for first, second in zip(legacy, persisted)
     )
     if strong_equal:
-        if all(_versions_compatible(first, second) for first, second in zip(legacy, persisted)):
-            return {
-                "relation": "SAME_EVIDENCE",
-                **base,
-                "reason_codes": ["SAME_STRONG_IDENTITY"],
-            }
         return {
-            "relation": "AMBIGUOUS",
+            "relation": "SAME_EVIDENCE",
             **base,
-            "reason_codes": ["INCOMPATIBLE_VERSIONS"],
+            "reason_codes": ["SAME_STRONG_IDENTITY"],
+        }
+
+    if all_strong:
+        return {
+            "relation": "DIFFERENT_EVIDENCE",
+            **base,
+            "reason_codes": ["DIFFERENT_STRONG_IDENTITY"],
         }
 
     if all(
@@ -440,6 +483,25 @@ def _required_lineage_count(field: str, report: Mapping) -> int | None:
     return fixed_counts.get(field)
 
 
+def _score_relevant_lineage(
+    field: str,
+    report: Mapping,
+    lineage: Sequence[Mapping],
+) -> tuple[list[Mapping], int] | None:
+    """Select the exact C v1.2-exp EPS history window from flattened lineage."""
+    if field != "eps_yoy_pct":
+        return list(lineage), len(lineage)
+    history = report.get(field)
+    if not isinstance(history, list):
+        return None
+    expected = len(history) * 2
+    if len(lineage) != expected:
+        return None
+    records = min(4, len(history))
+    width = records * 2
+    return list(lineage[-width:]), records
+
+
 def _compare_input_lineage(
     field: str,
     legacy_report: Mapping,
@@ -464,6 +526,26 @@ def _compare_input_lineage(
             "reason_codes": ["INCOMPLETE_DERIVED_LINEAGE"],
             "order_changed": False,
         }
+    if field == "eps_yoy_pct":
+        legacy_selected = _score_relevant_lineage(field, legacy_report, legacy)
+        persisted_selected = _score_relevant_lineage(field, persisted_report, persisted)
+        if legacy_selected is None or persisted_selected is None:
+            return {
+                "relation": "AMBIGUOUS",
+                "legacy_strengths": [identity_strength(item) for item in legacy],
+                "persisted_strengths": [identity_strength(item) for item in persisted],
+                "reason_codes": ["INCOMPLETE_DERIVED_LINEAGE"],
+                "order_changed": False,
+            }
+        full_relation = compare_evidence_lineage(legacy, persisted)
+        score_relation = compare_evidence_lineage(
+            legacy_selected[0], persisted_selected[0],
+        )
+        score_relation["full_history_relation"] = (
+            "EQUIVALENT" if full_relation["relation"] == "SAME_EVIDENCE" else "DIFFERENT"
+        )
+        score_relation["score_relevant_relation"] = score_relation["relation"]
+        return score_relation
     return compare_evidence_lineage(legacy, persisted)
 
 
@@ -493,9 +575,15 @@ def _classify_input(
             reasons.append("IDENTITY_AMBIGUOUS")
         return {"category": "NOT_COMPARABLE", "reason_codes": reasons}
     if relation == "SAME_EVIDENCE":
+        score_relevant = field_comparison.get("score_relevant_history")
+        comparison_equivalent = field_comparison.get("equivalent")
+        if field == "eps_yoy_pct" and isinstance(score_relevant, Mapping):
+            comparison_equivalent = score_relevant.get("equivalent")
         if field_comparison.get("status") == "EXACT":
             return {"category": "MATCH", "reason_codes": reasons}
-        if field_comparison.get("equivalent") is True:
+        if comparison_equivalent is True:
+            if field == "eps_yoy_pct" and field_comparison.get("equivalent") is not True:
+                reasons = reasons + ["FULL_HISTORY_DIFFERENCE_NON_SCORE_RELEVANT"]
             return {
                 "category": "NUMERIC_EQUIVALENT",
                 "reason_codes": reasons + ["VALUE_WITHIN_TOLERANCE"],
@@ -634,6 +722,45 @@ def _global_classification(
     }
 
 
+def _classify_integrity_input(
+    field: str,
+    legacy_report: Mapping | None,
+    persisted_report: Mapping | None,
+) -> dict:
+    """Compare one independently reconstructed categorical C input."""
+    if not isinstance(legacy_report, Mapping) or field not in legacy_report:
+        return {"category": "NOT_COMPARABLE", "reason_codes": ["MISSING_LEGACY"]}
+    if not isinstance(persisted_report, Mapping) or field not in persisted_report:
+        return {"category": "NOT_COMPARABLE", "reason_codes": ["MISSING_PERSISTED"]}
+    valid_statuses = (
+        VALID_DATA_INTEGRITY_STATUSES
+        if field == "data_integrity"
+        else VALID_SPLIT_INTEGRITY_STATUSES
+    )
+    legacy_valid = isinstance(legacy_report[field], str) and legacy_report[field] in valid_statuses
+    persisted_valid = isinstance(persisted_report[field], str) and persisted_report[field] in valid_statuses
+    if not legacy_valid or not persisted_valid:
+        return {
+            "category": "NOT_COMPARABLE",
+            "reason_codes": ["INTEGRITY_STATUS_INVALID"],
+            "legacy_value_valid": legacy_valid,
+            "persisted_value_valid": persisted_valid,
+        }
+    if legacy_report[field] == persisted_report[field]:
+        return {
+            "category": "MATCH",
+            "reason_codes": [],
+            "legacy_value_valid": True,
+            "persisted_value_valid": True,
+        }
+    return {
+        "category": "POSSIBLE_REGRESSION",
+        "reason_codes": ["INTEGRITY_SEMANTIC_VALUE_DIFFERENCE"],
+        "legacy_value_valid": True,
+        "persisted_value_valid": True,
+    }
+
+
 def _severity(classification: Mapping, gaps: Sequence[Mapping]) -> str:
     primary = classification["primary"]
     if primary == "SEMANTIC_GAP":
@@ -655,6 +782,16 @@ def _score_isolation(
     persisted_report: Mapping | None,
     shared_live_complements: Mapping | None,
 ) -> dict:
+    if (
+        persisted_report is not None
+        and persisted_report.get("independently_reconstructed_by_new_architecture") is True
+    ):
+        from database.c_dual_run import compare_score_equivalence_independent
+
+        return compare_score_equivalence_independent(
+            copy.deepcopy(dict(legacy_report or {})),
+            copy.deepcopy(dict(persisted_report)),
+        )
     if shared_live_complements is None:
         return {"status": "NOT_RUN", "reason_codes": ["SHARED_LIVE_COMPLEMENTS_NOT_PROVIDED"]}
     if legacy_report is None or persisted_report is None:
@@ -674,6 +811,182 @@ def _score_isolation(
     )
 
 
+def _final_end_to_end_gate(
+    persisted_report: Mapping | None,
+    classification: Mapping,
+    alignments: Mapping[str, Mapping],
+    score_isolation: Mapping,
+    semantic_gaps: Sequence[Mapping],
+    acquisition: Mapping,
+) -> dict:
+    """Aggregate the score-relevant C v1.2-exp equivalence contract.
+
+    Full payload/history comparison remains diagnostic only; this gate uses
+    the exact inputs and evidence subset consumed by the scorer.
+    """
+    report = persisted_report if isinstance(persisted_report, Mapping) else {}
+    contract = report.get("c_input_contract", {})
+    contract_inputs = contract.get("inputs", {}) if isinstance(contract, Mapping) else {}
+    contract_inputs = contract_inputs if isinstance(contract_inputs, Mapping) else {}
+    required_inputs = tuple(INDEPENDENT_C_INPUT_KEYS)
+    required_input_set = set(required_inputs)
+    per_input = classification.get("per_input", {})
+    score_categories = {
+        "MATCH", "NUMERIC_EQUIVALENT",
+    }
+    provider_failures = acquisition.get("provider_failures", [])
+    input_validation = {}
+    reason_codes = []
+    for field in required_inputs:
+        entry = contract_inputs.get(field)
+        entry_is_mapping = isinstance(entry, Mapping)
+        required_fields_present = (
+            entry_is_mapping
+            and "value" in entry
+            and "independently_reconstructed" in entry
+        )
+        structurally_valid = bool(required_fields_present)
+        independent = bool(
+            structurally_valid
+            and entry.get("independently_reconstructed") is True
+        )
+        value_matches_report = bool(
+            structurally_valid
+            and field in report
+            and entry.get("value") == report.get(field)
+        )
+        comparison = per_input.get(field)
+        semantically_equivalent = bool(
+            isinstance(comparison, Mapping)
+            and comparison.get("category") in score_categories
+        )
+        item_reasons = []
+        if field in {"data_integrity", "split_integrity_status"}:
+            valid_statuses = (
+                VALID_DATA_INTEGRITY_STATUSES
+                if field == "data_integrity"
+                else VALID_SPLIT_INTEGRITY_STATUSES
+            )
+            contract_value_valid = (
+                entry_is_mapping
+                and isinstance(entry.get("value"), str)
+                and entry.get("value") in valid_statuses
+            )
+            persisted_value_valid = (
+                isinstance(report.get(field), str)
+                and report.get(field) in valid_statuses
+            )
+            comparison_values_valid = (
+                isinstance(comparison, Mapping)
+                and comparison.get("legacy_value_valid") is True
+                and comparison.get("persisted_value_valid") is True
+            )
+            if not (contract_value_valid and persisted_value_valid and comparison_values_valid):
+                semantically_equivalent = False
+                item_reasons.append("INTEGRITY_STATUS_INVALID")
+        if not entry_is_mapping or not required_fields_present:
+            item_reasons.append("C_INPUT_CONTRACT_ENTRY_INVALID")
+        if not independent:
+            item_reasons.append("C_INPUT_NOT_INDEPENDENT")
+        if not value_matches_report:
+            item_reasons.append("C_INPUT_CONTRACT_VALUE_MISMATCH")
+        if not semantically_equivalent:
+            item_reasons.append("C_INPUT_SEMANTIC_MISMATCH")
+        if isinstance(comparison, Mapping):
+            item_reasons.extend(comparison.get("reason_codes", ()))
+        reason_codes.extend(item_reasons)
+        input_validation[field] = {
+            "structurally_valid": structurally_valid,
+            "independently_reconstructed": independent,
+            "value_matches_report": value_matches_report,
+            "semantically_equivalent": semantically_equivalent,
+            "valid": (
+                structurally_valid
+                and independent
+                and value_matches_report
+                and semantically_equivalent
+            ),
+            "reason_codes": item_reasons,
+        }
+
+    exact_required_input_count = (
+        len(contract_inputs) == len(required_inputs)
+        and set(contract_inputs) == required_input_set
+    )
+    if not exact_required_input_count:
+        reason_codes.append("C_INPUT_CONTRACT_COUNT_INVALID")
+    valid_count = sum(
+        item["structurally_valid"] for item in input_validation.values()
+    )
+    independent_count = sum(
+        item["independently_reconstructed"] for item in input_validation.values()
+    )
+    equivalent_count = sum(
+        item["valid"] for item in input_validation.values()
+    )
+    contract_validation = {
+        "required_count": len(required_inputs),
+        "present_count": len(contract_inputs),
+        "valid_count": valid_count,
+        "independent_count": independent_count,
+        "equivalent_count": equivalent_count,
+        "per_input": input_validation,
+    }
+    all_inputs_valid_and_independent = (
+        exact_required_input_count
+        and valid_count == len(required_inputs)
+        and independent_count == len(required_inputs)
+        and report.get("independently_reconstructed_by_new_architecture") is True
+    )
+    all_input_values_equivalent = equivalent_count == len(required_inputs)
+    integrity_semantics_equivalent = all(
+        input_validation[field]["semantically_equivalent"]
+        for field in ("data_integrity", "split_integrity_status")
+    )
+    ingestion_completeness_established = (
+        "INGESTION_COMPLETENESS_NOT_ESTABLISHED"
+        not in classification.get("reason_codes", ())
+    )
+    conditions = {
+        "no_score_relevant_semantic_gaps": not any(
+            gap.get("score_relevant") is not False for gap in semantic_gaps
+        ),
+        "exact_required_input_count": exact_required_input_count,
+        "all_eleven_inputs_independent": all_inputs_valid_and_independent,
+        "no_shared_complements": (
+            score_isolation.get("independent_inputs") is True
+            and score_isolation.get("shared_complements") is None
+        ),
+        "score_relevant_values_equivalent": all_input_values_equivalent,
+        "score_relevant_evidence_equivalent": all(
+            alignments.get(field, {}).get("relation") == "SAME_EVIDENCE"
+            for field in FUNDAMENTAL_INPUT_KEYS
+        ),
+        "score_equivalent": score_isolation.get("equivalent") is True,
+        "integrity_semantics_equivalent": integrity_semantics_equivalent,
+        "ingestion_completeness_established": ingestion_completeness_established,
+        "integrity_inputs_independent": (
+            all(
+                input_validation[field]["valid"]
+                for field in ("data_integrity", "split_integrity_status")
+            )
+        ),
+        "provider_failures_non_blocking": all(
+            item.get("affects_comparability") is False
+            for item in provider_failures
+        ),
+    }
+    equivalent = all(conditions.values())
+    return {
+        "equivalent": equivalent,
+        "status": "ESTABLISHED" if equivalent else "NOT_ESTABLISHED",
+        "conditions": conditions,
+        "input_contract_validation": contract_validation,
+        "reason_codes": _deduplicated(reason_codes),
+        "full_history_differences_allowed": True,
+    }
+
+
 def diagnose_c_snapshots(
     legacy_snapshot: Mapping | None,
     persisted_snapshot: Mapping | None,
@@ -689,8 +1002,26 @@ def diagnose_c_snapshots(
     legacy_lineage = {} if legacy_snapshot is None else legacy_snapshot.get("lineage_by_input", {})
     persisted_lineage = {} if persisted_snapshot is None else persisted_snapshot.get("lineage_by_input", {})
     acquisition = _run_status(legacy_snapshot, persisted_snapshot)
+    independent_persisted = bool(
+        isinstance(persisted_snapshot, Mapping)
+        and isinstance(persisted_snapshot.get("fundamental_report"), Mapping)
+        and persisted_snapshot["fundamental_report"].get(
+            "independently_reconstructed_by_new_architecture"
+        ) is True
+    )
+    legacy_gaps = (
+        None if legacy_snapshot is None else legacy_snapshot.get("semantic_gaps")
+    )
+    if independent_persisted:
+        legacy_gaps = [
+            gap for gap in (legacy_gaps or [])
+            if gap.get("code") not in {
+                "CORPORATE_ACTIONS_NOT_RECONSTRUCTED",
+                "DATA_INTEGRITY_NOT_RECONSTRUCTED",
+            }
+        ]
     gaps = _semantic_gaps(
-        None if legacy_snapshot is None else legacy_snapshot.get("semantic_gaps"),
+        legacy_gaps,
         None if persisted_snapshot is None else persisted_snapshot.get("semantic_gaps"),
         semantic_gaps,
     )
@@ -735,7 +1066,23 @@ def diagnose_c_snapshots(
         }
         differences = []
 
+    per_input.update({
+        field: _classify_integrity_input(field, legacy_report, persisted_report)
+        for field in ("data_integrity", "split_integrity_status")
+    })
+
     classification = _global_classification(per_input, acquisition, gaps)
+    score_isolation = _score_isolation(
+        legacy_report, persisted_report, shared_live_complements,
+    )
+    end_to_end_gate = _final_end_to_end_gate(
+        persisted_report,
+        classification,
+        alignments,
+        score_isolation,
+        gaps,
+        acquisition,
+    )
     result = {
         "metadata": _json_safe_dates(copy.deepcopy(dict(capture_metadata))),
         "acquisition_status": acquisition,
@@ -745,9 +1092,7 @@ def diagnose_c_snapshots(
         "fundamental_comparison": fundamental,
         "fundamental_differences": differences,
         "freshness": calculate_freshness(persisted_lineage, capture_metadata),
-        "score_isolation": _score_isolation(
-            legacy_report, persisted_report, shared_live_complements,
-        ),
+        "score_isolation": score_isolation,
         "legacy_end_to_end_score": (
             None
             if legacy_snapshot is None
@@ -756,7 +1101,8 @@ def diagnose_c_snapshots(
         "semantic_gaps": gaps,
         "classification": classification,
         "severity": _severity(classification, gaps),
-        "end_to_end_equivalent": False,
-        "end_to_end_status": "NOT_ESTABLISHED",
+        "end_to_end_equivalent": end_to_end_gate["equivalent"],
+        "end_to_end_status": end_to_end_gate["status"],
+        "end_to_end_gate": end_to_end_gate,
     }
     return _json_safe_dates(result)

@@ -26,6 +26,11 @@ FUNDAMENTAL_INPUT_KEYS = (
     "eps_loss_to_profit",
 )
 
+INDEPENDENT_C_INPUT_KEYS = FUNDAMENTAL_INPUT_KEYS + (
+    "data_integrity",
+    "split_integrity_status",
+)
+
 COMPARISON_POLICY = {
     "eps": {"mode": "numeric", "abs_tol": 1e-8, "rel_tol": 1e-7},
     "large_monetary": {"mode": "numeric", "abs_tol": 0.01, "rel_tol": 1e-10},

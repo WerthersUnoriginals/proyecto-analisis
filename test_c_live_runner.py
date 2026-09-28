@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import os
 import subprocess
@@ -364,6 +365,9 @@ class RunnerContractTests(unittest.TestCase):
         self.assertEqual(result["acquisition_status"]["run_status"], "PARTIAL")
         self.assertEqual(result["classification"]["primary"], "SEMANTIC_GAP")
         self.assertNotIn("POSSIBLE_REGRESSION", result["classification"]["categories_present"])
+
+    def test_persisted_scalars_do_not_carry_unused_central_c_quality(self):
+        self.assertNotIn('"central_c_quality"', inspect.getsource(_default_load_persisted_rows))
 
     def test_loader_exception_is_sanitized_failed_and_not_retried(self):
         calls = []

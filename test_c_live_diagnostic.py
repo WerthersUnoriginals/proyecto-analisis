@@ -10,6 +10,8 @@ from database.c_dual_run_contract import (
     load_aapl_dual_run_fixture,
 )
 from database.c_live_diagnostic import (
+    _compare_input_lineage,
+    _final_end_to_end_gate,
     calculate_freshness,
     compare_evidence_lineage,
     diagnose_c_snapshots,
@@ -419,6 +421,78 @@ class ClassificationTests(unittest.TestCase):
 
 
 class DerivedIdentityTests(unittest.TestCase):
+    def test_sec_identity_type_is_certification_not_physical_key(self):
+        legacy = _sec_evidence(source_identity_type=None)
+        persisted = _sec_evidence(source_identity_type="SEC_ACCESSION")
+        result = compare_evidence_lineage([legacy], [persisted])
+        self.assertEqual(result["relation"], "SAME_EVIDENCE")
+
+    def test_conflicting_sec_identity_type_fails_closed(self):
+        legacy = _sec_evidence(source_identity_type="OTHER_TYPE")
+        persisted = _sec_evidence(source_identity_type="SEC_ACCESSION")
+        result = compare_evidence_lineage([legacy], [persisted])
+        self.assertEqual(result["relation"], "AMBIGUOUS")
+
+    def test_sec_identity_canonicalizes_date_representations(self):
+        legacy = _sec_evidence(
+            source_period_start=date(2024, 12, 29),
+            source_period_end=date(2025, 3, 29),
+        )
+        persisted = _sec_evidence(
+            source_period_start="2024-12-29",
+            source_period_end="2025-03-29",
+        )
+        result = compare_evidence_lineage([legacy], [persisted])
+        self.assertEqual(result["relation"], "SAME_EVIDENCE")
+
+    def test_eps_lineage_uses_exact_last_four_score_observations(self):
+        legacy_report = {"eps_yoy_pct": [{"date": f"202{i}-01-01", "value": float(i)} for i in range(12)]}
+        persisted_report = {"eps_yoy_pct": [{"date": f"202{i}-01-01", "value": float(i)} for i in range(15)]}
+        def lineage(ids):
+            return [
+                _sec_evidence(source_record_id=f"acc-{index}")
+                for item in ids
+                for index in (item, item)
+            ]
+        result = _compare_input_lineage(
+            "eps_yoy_pct", legacy_report, persisted_report,
+            lineage(range(12)), lineage(list(range(-3, 0)) + list(range(12))),
+        )
+        self.assertEqual(result["relation"], "SAME_EVIDENCE")
+        self.assertEqual(result["full_history_relation"], "DIFFERENT")
+        self.assertEqual(result["score_relevant_relation"], "SAME_EVIDENCE")
+
+    def test_eps_score_relevant_identity_difference_is_not_hidden(self):
+        report = {"eps_yoy_pct": [{"date": f"202{i}-01-01", "value": float(i)} for i in range(12)]}
+        def lineage(ids):
+            return [
+                _sec_evidence(source_record_id=f"acc-{index}")
+                for item in ids
+                for index in (item, item)
+            ]
+        changed = list(range(12))
+        changed[-1] = 99
+        result = _compare_input_lineage(
+            "eps_yoy_pct", report, report,
+            lineage(range(12)), lineage(changed),
+        )
+        self.assertEqual(result["score_relevant_relation"], "DIFFERENT_EVIDENCE")
+
+    def test_same_strong_identity_remains_same_evidence_when_processing_versions_differ(self):
+        persisted = _sec_evidence(normalizer_version="sec-normalized-v2")
+        legacy = _sec_evidence(normalizer_version=None)
+        legacy.pop("normalizer_version")
+        legacy["origin_normalizer_version"] = None
+        result = compare_evidence_lineage([legacy], [persisted])
+        self.assertEqual(result["relation"], "SAME_EVIDENCE")
+        self.assertEqual(result["processing_version_status"], "LEGACY_VERSION_UNKNOWN")
+
+    def test_different_sec_accession_is_different_evidence_even_same_period(self):
+        legacy = _sec_evidence(source_record_id="0000320193-25-000057")
+        persisted = _sec_evidence(source_record_id="0000320193-25-000058")
+        result = compare_evidence_lineage([legacy], [persisted])
+        self.assertEqual(result["relation"], "DIFFERENT_EVIDENCE")
+
     def test_same_yoy_number_with_different_comparable_is_not_same_evidence(self):
         legacy = [_sec_evidence(raw_id=1), _sec_evidence(raw_id=2, source_record_id="prior-a")]
         persisted = [_sec_evidence(raw_id=1), _sec_evidence(raw_id=3, source_record_id="prior-b")]
@@ -505,6 +579,280 @@ class FreshnessTests(unittest.TestCase):
 
 
 class SemanticGapAndScoreTests(unittest.TestCase):
+    def _gate_inputs(self):
+        contract_fields = (
+            "latest_eps_yoy_pct", "previous_eps_yoy_pct", "eps_acceleration_pp",
+            "latest_revenue_yoy_pct", "previous_revenue_yoy_pct",
+            "revenue_acceleration_pp", "latest_eps", "eps_yoy_pct",
+            "eps_loss_to_profit", "data_integrity", "split_integrity_status",
+        )
+        values = {field: 1 for field in contract_fields}
+        values.update({
+            "data_integrity": "VERIFIED",
+            "split_integrity_status": "NO_RECENT_SPLITS",
+        })
+        report = {
+            **values,
+            "independently_reconstructed_by_new_architecture": True,
+            "c_input_contract": {
+                "inputs": {
+                    field: {
+                        "value": values[field],
+                        "independently_reconstructed": True,
+                    }
+                    for field in contract_fields
+                },
+            },
+        }
+        classification = {
+            "per_input": {
+                field: {"category": "NUMERIC_EQUIVALENT"}
+                for field in FUNDAMENTAL_INPUT_KEYS
+            },
+        }
+        classification["per_input"].update({
+            "data_integrity": {
+                "category": "MATCH", "legacy_value_valid": True,
+                "persisted_value_valid": True,
+            },
+            "split_integrity_status": {
+                "category": "MATCH", "legacy_value_valid": True,
+                "persisted_value_valid": True,
+            },
+        })
+        alignments = {
+            field: {"relation": "SAME_EVIDENCE"}
+            for field in FUNDAMENTAL_INPUT_KEYS
+        }
+        score = {
+            "equivalent": True,
+            "independent_inputs": True,
+            "shared_complements": None,
+        }
+        acquisition = {"provider_failures": []}
+        return report, classification, alignments, score, acquisition
+
+    def _run_gate(self, values, semantic_gaps=()):
+        return _final_end_to_end_gate(
+            values[0], values[1], values[2], values[3], semantic_gaps, values[4],
+        )
+
+    def test_final_gate_accepts_score_relevant_contract_with_full_history_difference(self):
+        report, classification, alignments, score, acquisition = self._gate_inputs()
+        alignments["eps_yoy_pct"].update({
+            "full_history_relation": "DIFFERENT",
+            "score_relevant_relation": "SAME_EVIDENCE",
+        })
+        result = _final_end_to_end_gate(
+            report, classification, alignments, score, [], acquisition,
+        )
+        self.assertTrue(result["equivalent"])
+        self.assertEqual(result["status"], "ESTABLISHED")
+        self.assertEqual(result["input_contract_validation"]["required_count"], 11)
+        self.assertEqual(result["input_contract_validation"]["valid_count"], 11)
+        self.assertEqual(result["input_contract_validation"]["independent_count"], 11)
+        self.assertEqual(result["input_contract_validation"]["equivalent_count"], 11)
+
+    def test_final_gate_rejects_last_four_value_difference(self):
+        values = self._gate_inputs()
+        values[1]["per_input"]["eps_yoy_pct"] = {"category": "POSSIBLE_REGRESSION"}
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+
+    def test_final_gate_rejects_score_relevant_identity_difference(self):
+        values = self._gate_inputs()
+        values[2]["eps_yoy_pct"] = {"relation": "DIFFERENT_EVIDENCE"}
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+
+    def test_final_gate_rejects_semantic_gap(self):
+        values = self._gate_inputs()
+        result = self._run_gate(
+            values,
+            [{"code": "DATA_INTEGRITY_NOT_RECONSTRUCTED", "score_relevant": True}],
+        )
+        self.assertFalse(result["equivalent"])
+
+    def test_final_gate_rejects_shared_complements(self):
+        values = self._gate_inputs()
+        values[3]["shared_complements"] = {"data_integrity": "VERIFIED"}
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+
+    def test_final_gate_rejects_score_difference(self):
+        values = self._gate_inputs()
+        values[3]["equivalent"] = False
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+
+    def test_non_comparable_provider_failure_does_not_block_gate(self):
+        values = self._gate_inputs()
+        values[4]["provider_failures"] = [{"affects_comparability": False}]
+        result = self._run_gate(values)
+        self.assertTrue(result["equivalent"])
+
+    def test_unknown_ingestion_completeness_blocks_without_provider_failure(self):
+        values = self._gate_inputs()
+        values[1]["reason_codes"] = ["INGESTION_COMPLETENESS_NOT_ESTABLISHED"]
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertEqual(result["status"], "NOT_ESTABLISHED")
+
+    def test_unknown_ingestion_completeness_blocks_with_non_comparable_failure(self):
+        values = self._gate_inputs()
+        values[1]["reason_codes"] = ["INGESTION_COMPLETENESS_NOT_ESTABLISHED"]
+        values[4]["provider_failures"] = [{"affects_comparability": False}]
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertFalse(result["conditions"]["ingestion_completeness_established"])
+
+    def test_blocking_provider_failure_remains_blocking(self):
+        values = self._gate_inputs()
+        values[4]["provider_failures"] = [{"affects_comparability": True}]
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertFalse(result["conditions"]["provider_failures_non_blocking"])
+
+    def test_final_gate_rejects_non_mapping_required_contract_entries(self):
+        malformed_values = (None, [], "", object())
+        for malformed in malformed_values:
+            with self.subTest(malformed=type(malformed).__name__):
+                values = self._gate_inputs()
+                values[0]["c_input_contract"]["inputs"]["data_integrity"] = malformed
+                result = self._run_gate(values)
+                self.assertFalse(result["equivalent"])
+                self.assertEqual(result["status"], "NOT_ESTABLISHED")
+                self.assertFalse(result["conditions"]["all_eleven_inputs_independent"])
+                self.assertIn("C_INPUT_CONTRACT_ENTRY_INVALID", result["reason_codes"])
+
+    def test_final_gate_rejects_all_eleven_none_entries(self):
+        values = self._gate_inputs()
+        values[0]["c_input_contract"]["inputs"] = {
+            key: None for key in values[0]["c_input_contract"]["inputs"]
+        }
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertEqual(result["input_contract_validation"]["valid_count"], 0)
+        self.assertEqual(result["input_contract_validation"]["independent_count"], 0)
+
+    def test_final_gate_rejects_missing_or_empty_contract(self):
+        for mutation in ("missing_key", "empty_contract"):
+            with self.subTest(mutation=mutation):
+                values = self._gate_inputs()
+                if mutation == "missing_key":
+                    del values[0]["c_input_contract"]["inputs"]["latest_eps"]
+                else:
+                    values[0]["c_input_contract"]["inputs"] = {}
+                result = self._run_gate(values)
+                self.assertFalse(result["equivalent"])
+                self.assertIn("C_INPUT_CONTRACT_COUNT_INVALID", result["reason_codes"])
+
+    def test_final_gate_rejects_missing_null_or_false_independence(self):
+        for state in ("missing", None, False):
+            with self.subTest(state=state):
+                values = self._gate_inputs()
+                entry = values[0]["c_input_contract"]["inputs"]["latest_eps"]
+                if state == "missing":
+                    del entry["independently_reconstructed"]
+                else:
+                    entry["independently_reconstructed"] = state
+                result = self._run_gate(values)
+                self.assertFalse(result["equivalent"])
+                self.assertIn("C_INPUT_NOT_INDEPENDENT", result["reason_codes"])
+
+    def test_final_gate_rejects_data_integrity_difference_despite_equal_score(self):
+        values = self._gate_inputs()
+        values[1]["per_input"]["data_integrity"] = {"category": "POSSIBLE_REGRESSION"}
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertTrue(values[3]["equivalent"])
+        self.assertFalse(result["conditions"]["integrity_semantics_equivalent"])
+
+    def test_final_gate_rejects_split_integrity_difference_despite_equal_score(self):
+        values = self._gate_inputs()
+        values[1]["per_input"]["split_integrity_status"] = {"category": "POSSIBLE_REGRESSION"}
+        result = self._run_gate(values)
+        self.assertFalse(result["equivalent"])
+        self.assertTrue(values[3]["equivalent"])
+        self.assertFalse(result["conditions"]["integrity_semantics_equivalent"])
+
+    def test_final_gate_rejects_invalid_data_integrity_even_when_both_sides_match(self):
+        for invalid in (None, "", "BOGUS", [], 1, True, object()):
+            with self.subTest(invalid=repr(invalid)):
+                values = self._gate_inputs()
+                values[0]["data_integrity"] = invalid
+                values[0]["c_input_contract"]["inputs"]["data_integrity"]["value"] = invalid
+                values[1]["per_input"]["data_integrity"] = {"category": "MATCH"}
+                result = self._run_gate(values)
+                self.assertFalse(result["equivalent"])
+                self.assertIn("INTEGRITY_STATUS_INVALID", result["reason_codes"])
+
+    def test_final_gate_rejects_invalid_split_status_even_when_both_sides_match(self):
+        for invalid in (None, "", "BOGUS", [], 1, False, object()):
+            with self.subTest(invalid=repr(invalid)):
+                values = self._gate_inputs()
+                values[0]["split_integrity_status"] = invalid
+                values[0]["c_input_contract"]["inputs"]["split_integrity_status"]["value"] = invalid
+                values[1]["per_input"]["split_integrity_status"] = {"category": "MATCH"}
+                result = self._run_gate(values)
+                self.assertFalse(result["equivalent"])
+                self.assertIn("INTEGRITY_STATUS_INVALID", result["reason_codes"])
+
+    def test_full_diagnose_rejects_matching_invalid_integrity_status(self):
+        persisted = _report()
+        persisted.update({
+            "data_integrity": None,
+            "split_integrity_status": "NO_RECENT_SPLITS",
+            "independently_reconstructed_by_new_architecture": True,
+        })
+        persisted["c_input_contract"] = {
+            "inputs": {
+                key: {"value": persisted[key], "independently_reconstructed": True}
+                for key in (
+                    "latest_eps_yoy_pct", "previous_eps_yoy_pct", "eps_acceleration_pp",
+                    "latest_revenue_yoy_pct", "previous_revenue_yoy_pct",
+                    "revenue_acceleration_pp", "latest_eps", "eps_yoy_pct",
+                    "eps_loss_to_profit", "data_integrity", "split_integrity_status",
+                )
+            },
+        }
+        legacy = copy.deepcopy(persisted)
+        legacy.pop("independently_reconstructed_by_new_architecture")
+        legacy.pop("c_input_contract")
+        result = diagnose_c_snapshots(
+            _snapshot(report=legacy),
+            _snapshot(report=persisted),
+            capture_metadata=CAPTURE_METADATA,
+        )
+        self.assertFalse(result["end_to_end_equivalent"])
+        self.assertEqual(result["end_to_end_status"], "NOT_ESTABLISHED")
+
+    def test_diagnose_compares_integrity_values_directly(self):
+        persisted = self._gate_inputs()[0]
+        legacy = copy.deepcopy(persisted)
+        legacy.pop("independently_reconstructed_by_new_architecture")
+        legacy.pop("c_input_contract")
+        for field, legacy_value, persisted_value in (
+            ("data_integrity", "REVIEW_REQUIRED", "VERIFIED"),
+            ("split_integrity_status", "UNKNOWN", "NO_RECENT_SPLITS"),
+        ):
+            with self.subTest(field=field):
+                legacy_case = copy.deepcopy(legacy)
+                legacy_case[field] = legacy_value
+                persisted_case = copy.deepcopy(persisted)
+                persisted_case[field] = persisted_value
+                persisted_case["c_input_contract"]["inputs"][field]["value"] = persisted_value
+                result = diagnose_c_snapshots(
+                    _snapshot(report=legacy_case),
+                    _snapshot(report=persisted_case),
+                    capture_metadata=CAPTURE_METADATA,
+                )
+                self.assertFalse(result["end_to_end_equivalent"])
+                self.assertEqual(
+                    result["classification"]["per_input"][field]["category"],
+                    "POSSIBLE_REGRESSION",
+                )
+
     def test_split_and_data_integrity_gaps_override_match_with_explicit_severity(self):
         for code, score_relevant, severity in (
             ("CORPORATE_ACTIONS_NOT_RECONSTRUCTED", False, "INFO"),

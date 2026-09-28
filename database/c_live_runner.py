@@ -52,6 +52,7 @@ _EVIDENCE_FIELDS = (
     "provider_id",
     "identity_is_immutable",
     "source_identity_type",
+    "source_identity_error",
 )
 
 
@@ -83,11 +84,77 @@ def _json_safe_decimals(value):
     return value
 
 
-def _default_load_persisted_rows(company_id: int) -> list[dict]:
-    from database.effective_fundamentals import load_effective_current
-
+def _default_load_persisted_rows(company_id: int, *, as_of: datetime | None = None):
     try:
-        return load_effective_current(company_id)
+        if as_of is None:
+            from database.effective_fundamentals import load_effective_current
+            rows = load_effective_current(company_id)
+            return rows
+        from database.c_data_integrity import (
+            load_normalized_evidence, reconstruct_persisted_integrity,
+        )
+        from database.c_fundamentals_adapter import (
+            _effective_observations,
+            normalized_rows_to_effective_rows,
+            build_c_fundamental_report_from_normalized,
+        )
+        from database.effective_fundamentals import annual_comparisons_by_source
+        from database.corporate_actions import load_latest_capture_as_of
+
+        normalized = load_normalized_evidence(company_id, as_of)
+        visible_rows = list(normalized)
+        capture, events = load_latest_capture_as_of(company_id, as_of)
+        captures = [] if capture is None else [capture]
+        events_by_capture_id = {} if capture is None else {capture.id: events}
+        lineage_rows = normalized_rows_to_effective_rows(
+            visible_rows, as_of=as_of,
+        )
+        effective_observations = _effective_observations(lineage_rows)
+        fundamental_report = build_c_fundamental_report_from_normalized(
+            visible_rows, as_of=as_of,
+        )
+        eps_observations = [
+            item for item in effective_observations
+            if item.observation.metric == "EPS_DILUTED"
+        ]
+        latest_eps = max(
+            eps_observations,
+            key=lambda item: item.observation.series_date,
+            default=None,
+        )
+        latest_pair = next(
+            (item for item in annual_comparisons_by_source(effective_observations, "EPS_DILUTED")
+             if latest_eps is not None and item.current is latest_eps),
+            None,
+        )
+        scalars = {
+            key: fundamental_report[key]
+            for key in (
+                "latest_eps_yoy_pct", "previous_eps_yoy_pct", "eps_acceleration_pp",
+                "latest_revenue_yoy_pct", "previous_revenue_yoy_pct",
+                "revenue_acceleration_pp",
+            )
+        }
+        scalars.update({
+            "previous_eps_period": (
+                None if latest_pair is None else latest_pair.comparable.observation.series_date
+            ),
+            "latest_eps_period": (
+                None if latest_eps is None else latest_eps.observation.series_date
+            ),
+        })
+        integrity = reconstruct_persisted_integrity(
+            normalized, captures, events_by_capture_id,
+            as_of=as_of, scalars=scalars,
+        )
+        return {
+            "fundamental_rows": visible_rows,
+            "lineage_rows": lineage_rows,
+            "fundamental_report": fundamental_report,
+            "integrity": integrity,
+            "company_id": company_id,
+            "as_of": as_of,
+        }
     except Exception as exc:
         missing_configuration = (
             isinstance(exc, RuntimeError)
@@ -194,6 +261,8 @@ def _identity_assessment(rows: Sequence[Mapping] | None) -> dict:
     )
     if missing_sec_accessions:
         limitations.append("PERSISTED_SEC_ACCESSION_NOT_EXPOSED")
+    if any(row.get("source_identity_error") for row in sec_rows):
+        limitations.append("PERSISTED_SEC_ACCESSION_INCONSISTENT")
     return {
         "origin_metadata_preserved": True,
         "raw_id_used_as_accession": False,
@@ -314,17 +383,73 @@ def _complete_report(report: Mapping) -> bool:
 
 def _persisted_snapshot(rows: Sequence[Mapping]) -> dict:
     *_, build_report, __, ___, ____ = _adapter_dependencies()
-    report = build_report(rows)
+    independent = isinstance(rows, Mapping) and "fundamental_rows" in rows
+    payload = rows if independent else None
+    effective_rows = (
+        payload.get("lineage_rows", payload["fundamental_rows"])
+        if independent else rows
+    )
+    report = (
+        payload["fundamental_report"]
+        if independent and "fundamental_report" in payload
+        else build_report(effective_rows)
+    )
+    if independent:
+        from database.c_fundamentals_adapter import build_independent_c_input_report
+        integrity = payload.get("integrity")
+        if integrity is None:
+            raise ValueError("independent persisted payload lacks integrity reconstruction")
+        if hasattr(integrity, "data_integrity"):
+            integrity = {
+                "data_integrity": integrity.data_integrity,
+                "split_integrity_status": integrity.split_integrity_status,
+            }
+        report = build_independent_c_input_report(
+            report, integrity,
+            company_id=payload["company_id"],
+            as_of=payload["as_of"],
+            provenance=payload.get("provenance"),
+        )
     complete = _complete_report(report)
     failures = [] if complete else [
         _failure("POSTGRESQL", "reconstruct_c_inputs", "PERSISTED_INPUTS_INCOMPLETE")
     ]
+    integrity_summary = None
+    if independent:
+        source_integrity = payload.get("integrity")
+        get_integrity = (
+            (lambda name, default=None: source_integrity.get(name, default))
+            if isinstance(source_integrity, Mapping)
+            else (lambda name, default=None: getattr(source_integrity, name, default))
+        )
+        consistency_values = get_integrity("consistency", {}) or {}
+        integrity_summary = {
+            "data_integrity": get_integrity("data_integrity"),
+            "data_quality": get_integrity("data_quality"),
+            "split_integrity_status": get_integrity("split_integrity_status"),
+            "current_yoy_crosses_split": get_integrity("current_yoy_crosses_split"),
+            "shares_quality": get_integrity("shares_quality"),
+            "warnings": list(get_integrity("warnings", ())),
+            "diagnostics": list(get_integrity("diagnostics", ())),
+            "consistency": {
+                key: {
+                    "status": value.get("status") if isinstance(value, Mapping) else value.status,
+                    "max_diff_pct": value.get("max_diff_pct") if isinstance(value, Mapping) else value.max_diff_pct,
+                    "avg_diff_pct": value.get("avg_diff_pct") if isinstance(value, Mapping) else value.avg_diff_pct,
+                    "matched_count": value.get("matched_count") if isinstance(value, Mapping) else value.matched_count,
+                    "reasons": list(value.get("reasons", ())) if isinstance(value, Mapping) else list(value.reasons),
+                }
+                for key, value in consistency_values.items()
+            },
+        }
     return {
         "fundamental_report": report,
-        "lineage_by_input": _build_persisted_lineage(rows),
+        "lineage_by_input": _build_persisted_lineage(effective_rows),
         "provider_failures": failures,
         "acquisition_status": "COMPLETE" if complete else "PARTIAL",
-        "semantic_gaps": copy.deepcopy(list(_SEMANTIC_GAPS)),
+        "semantic_gaps": [] if independent else copy.deepcopy(list(_SEMANTIC_GAPS)),
+        "independently_reconstructed_by_new_architecture": independent,
+        "integrity_reconstruction": integrity_summary,
     }
 
 
@@ -336,6 +461,14 @@ def _failed_snapshot(provider: str, operation: str, reason_code: str) -> dict:
         "acquisition_status": "FAILED",
         "semantic_gaps": copy.deepcopy(list(_SEMANTIC_GAPS)),
     }
+
+
+def load_independent_c_inputs(company_id: int, as_of: datetime) -> dict:
+    """Read-only production boundary for the complete persisted C contract."""
+    payload = _default_load_persisted_rows(company_id, as_of=as_of)
+    if not isinstance(payload, Mapping) or "fundamental_rows" not in payload:
+        raise AcquisitionFailure("independent persisted evidence unavailable")
+    return _persisted_snapshot(payload)
 
 
 def _append_acquisition_reason_codes(result: dict) -> None:
@@ -368,13 +501,18 @@ def run_live_c_diagnostic(
     )
     diagnose_snapshots = diagnose_snapshots or _default_diagnose
 
-    diagnostic_started_at = _iso(clock())
+    evaluation_as_of = clock()
+    diagnostic_started_at = _iso(evaluation_as_of)
     try:
-        rows = list(load_persisted_rows(company_id))
+        if load_persisted_rows is _default_load_persisted_rows:
+            loaded = load_persisted_rows(company_id, as_of=evaluation_as_of)
+        else:
+            loaded = load_persisted_rows(company_id)
+        rows = loaded if isinstance(loaded, Mapping) else list(loaded)
     except AcquisitionFailure:
         rows = None
         persisted = _failed_snapshot(
-            "POSTGRESQL", "load_effective_current", "DB_READ_FAILED",
+            "POSTGRESQL", "load_persisted_evidence", "DB_READ_FAILED",
         )
     persisted_read_at = _iso(clock())
     if rows is not None:
@@ -382,7 +520,7 @@ def run_live_c_diagnostic(
             _persisted_snapshot(rows)
             if rows
             else _failed_snapshot(
-                "POSTGRESQL", "load_effective_current", "NO_EFFECTIVE_ROWS",
+                "POSTGRESQL", "load_persisted_evidence", "NO_EFFECTIVE_ROWS",
             )
         )
 
@@ -411,9 +549,13 @@ def run_live_c_diagnostic(
         ):
             if key in legacy_metadata:
                 capture_metadata[key] = copy.deepcopy(legacy_metadata[key])
+    independent_persisted = bool(
+        isinstance(persisted, Mapping)
+        and persisted.get("independently_reconstructed_by_new_architecture") is True
+    )
     shared_complements = (
         None
-        if not isinstance(legacy, Mapping)
+        if independent_persisted or not isinstance(legacy, Mapping)
         else copy.deepcopy(legacy.get("shared_live_complements"))
     )
     result = diagnose_snapshots(
@@ -421,9 +563,13 @@ def run_live_c_diagnostic(
         persisted,
         capture_metadata=capture_metadata,
         shared_live_complements=shared_complements,
-        semantic_gaps=copy.deepcopy(list(_SEMANTIC_GAPS)),
+        semantic_gaps=([] if independent_persisted else copy.deepcopy(list(_SEMANTIC_GAPS))),
     )
     result["metadata"]["diagnostic_completed_at"] = _iso(clock())
-    result["identity_assessment"] = _identity_assessment(rows)
+    identity_rows = (
+        rows.get("fundamental_rows", ())
+        if isinstance(rows, Mapping) else rows
+    )
+    result["identity_assessment"] = _identity_assessment(identity_rows)
     _append_acquisition_reason_codes(result)
     return _json_safe_decimals(result)
