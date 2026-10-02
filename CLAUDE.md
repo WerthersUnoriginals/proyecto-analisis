@@ -18,16 +18,19 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   Migraciones `2026-10-02_evidence_v3*` aplicadas; AAPL, MSFT y NVDA ingeridos.
 - **C v2 (`c-v2.6-compatible-v1`)** queda congelado como ruta legacy; sus tests
   y líneas base siguen válidos sólo para v2.
-- **A — Annual Earnings:** spec en borrador
-  `docs/superpowers/specs/2026-09-28-annual-earnings-design.md` (sin commitear).
-  Debe revisarse para apoyarse en v3 (evidencia anual ya almacenada,
-  `split-basis-v1`) y simplificar su protocolo de despliegue.
+- **A — Annual Earnings: implementado sobre v3** (spec
+  `docs/superpowers/specs/2026-10-02-annual-earnings-v3-design.md`; el borrador
+  de Codex del 2026-09-28 queda como histórico superado). Contrato
+  `a-input-contract-v1` y A Score v1 (`a-1.0-exp`, pesos aprobados).
+  Live 2026-10-02: AAPL 43.92 POOR, MSFT 88.31 VERY_STRONG, NVDA 100 EXCEPTIONAL.
 - N, S, L, I, M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
 
 - `fundamental_c.py` — módulo C legacy (v2.6). Oráculo de comportamiento. **No modificar.**
 - `c_score_v1.py` — C Score v1.2 (legacy). **No modificar** (byte a byte).
+- `a_score_v1.py` — A Score v1: resultado clásico O'Neil (25%/año, ROE 17%,
+  sin años en pérdida) + puntuación graduada 0-100.
 - `c_score_v13.py` — C Score v1.3, usado por C v3: una pérdida es evidencia
   desfavorable, no dato ausente (spec `2026-10-02-c-score-v1-3-design.md`).
   Mismos pesos y umbrales que v1.2.
@@ -44,6 +47,9 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
     `c_contract_v3.py`, `providers_v3.py`, `evidence_v3.py`,
     `ingest_v3.py` (`python -m database.ingest_v3 AAPL NVDA:0001045810`),
     `c_v3_runner.py` (`python -m database.c_v3_runner AAPL [--as-of ISO]`).
+  - A: `annual_v3.py` (años fiscales reales, ROE sobre patrimonio medio, CAGR
+    anclado), `a_contract_v1.py`, `a_v3_runner.py`
+    (`python -m database.a_v3_runner AAPL`).
   - `migrations/` — migraciones versionadas `YYYY-MM-DD_nombre_vN.sql`. Nunca editar una existente.
 - `fixtures/` — líneas base congeladas (AAPL) y Company Facts reales recortados
   (AAPL, NVDA, 2026-10-02) para tests offline de v3.
@@ -54,10 +60,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~494 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~525 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1
 ```
 
 - Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`. Usa la BD real
