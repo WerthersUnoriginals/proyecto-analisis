@@ -125,7 +125,8 @@ class RealFixtureTests(unittest.TestCase):
         self.assertTrue({"QUARTER", "YTD_9M", "ANNUAL"} <= classes)
 
     def test_catalog_is_versioned_and_ordered(self):
-        self.assertEqual(CATALOG_VERSION, "sec-tag-catalog-v3")
+        self.assertEqual(CATALOG_VERSION, "sec-tag-catalog-v4")
+        self.assertEqual(SEC_TAG_CATALOG["STOCKHOLDERS_EQUITY"][0], "StockholdersEquity")
         self.assertEqual(SEC_TAG_CATALOG["EPS_DILUTED"][0], "EarningsPerShareDiluted")
         self.assertEqual(
             SEC_TAG_CATALOG["REVENUE"][:2],

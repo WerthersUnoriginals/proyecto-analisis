@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Mapping
 
-CATALOG_VERSION = "sec-tag-catalog-v3"
+CATALOG_VERSION = "sec-tag-catalog-v4"
 
 # Ordered by preference within each metric.
 SEC_TAG_CATALOG: Mapping[str, tuple[str, ...]] = {
@@ -32,6 +32,10 @@ SEC_TAG_CATALOG: Mapping[str, tuple[str, ...]] = {
         "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
     ),
     "SPLIT_RATIO": ("StockholdersEquityNoteStockSplitConversionRatio1",),
+    "STOCKHOLDERS_EQUITY": (
+        "StockholdersEquity",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ),
 }
 
 METRIC_UNITS: Mapping[str, str] = {
@@ -41,6 +45,7 @@ METRIC_UNITS: Mapping[str, str] = {
     "NET_INCOME": "USD",
     "DILUTED_SHARES": "shares",
     "SPLIT_RATIO": "pure",
+    "STOCKHOLDERS_EQUITY": "USD",
 }
 
 TAG_TO_METRIC: Mapping[str, str] = {
