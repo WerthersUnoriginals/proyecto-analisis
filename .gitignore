@@ -1,3 +1,5 @@
 .env
 __pycache__/
 .claude/settings.local.json
+*.pyc
+resultado_*.csv
