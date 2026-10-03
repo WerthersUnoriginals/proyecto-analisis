@@ -1,4 +1,4 @@
-"""Batch ingestion and C/A/N/S/L/I evaluation of many companies.
+"""Batch ingestion and C/A/N/S/L/I/M evaluation of many companies.
 
 Usage::
 
@@ -27,13 +27,15 @@ def _default_evaluate(ticker: str, as_of: datetime):
     from database.n_v3_runner import evaluate_n
     from database.i_v3_runner import evaluate_i
     from database.l_v3_runner import evaluate_l
+    from database.m_v3_runner import evaluate_m
     from database.s_v3_runner import evaluate_s
 
     company = evidence_v3.load_company(ticker)
     if company is None:
         raise LookupError(f"ticker not ingested: {ticker}")
     return (evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of), evaluate_n(company[0], as_of),
-            evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of), evaluate_i(company[0], as_of))
+            evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of), evaluate_i(company[0], as_of),
+            evaluate_m(as_of))
 
 
 def _default_ingest(ticker: str):
@@ -108,8 +110,21 @@ def _i_fields(i_result: dict | None) -> dict:
     }
 
 
+def _m_fields(m_result: dict | None) -> dict:
+    if m_result is None:
+        return {}
+    contract, score = m_result["contract"], m_result["score"]
+    return {
+        "m_score": score["m_score_v1"]["normalized_score"],
+        "m_classic": score["m_classic"]["result"],
+        "m_market_state": contract["market_state"],
+        "m_data_integrity": contract["m_data_integrity"],
+    }
+
+
 def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None,
-         s_result: dict | None = None, l_result: dict | None = None, i_result: dict | None = None) -> dict:
+         s_result: dict | None = None, l_result: dict | None = None, i_result: dict | None = None,
+         m_result: dict | None = None) -> dict:
     c_contract, c_score = c_result["contract"], c_result["score"]
     a_contract, a_score = a_result["contract"], a_result["score"]
     return {
@@ -131,6 +146,7 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
         **_s_fields(s_result),
         **_l_fields(l_result),
         **_i_fields(i_result),
+        **_m_fields(m_result),
     }
 
 
@@ -190,6 +206,9 @@ def summarize(rows: list[dict]) -> dict:
         "l_classic": Counter(row.get("l_classic") for row in ok if "l_classic" in row),
         "i_data_integrity": Counter(row.get("i_data_integrity") for row in ok if "i_data_integrity" in row),
         "i_classic": Counter(row.get("i_classic") for row in ok if "i_classic" in row),
+        # M is market-wide: one value for every company at this as_of.
+        "market": {key: next((row[key] for row in ok if key in row), None)
+                   for key in ("m_market_state", "m_score", "m_classic", "m_data_integrity")},
         "diagnostics": Counter(
             item.split(":")[0] for row in ok
             for item in row["c_diagnostics"] + row["a_diagnostics"] + row.get("n_diagnostics", [])
@@ -203,7 +222,7 @@ def _pct(value) -> str:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Batch C/A/N/S/L/I evaluation")
+    parser = argparse.ArgumentParser(description="Batch C/A/N/S/L/I/M evaluation")
     parser.add_argument("tickers", nargs="*")
     parser.add_argument("--file", help="text file with one ticker per line")
     parser.add_argument("--ingest", action="store_true", help="ingest each ticker before evaluating")

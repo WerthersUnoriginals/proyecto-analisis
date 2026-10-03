@@ -121,6 +121,14 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(summary["i_classic"], Counter({"PASS": 1}))
         self.assertEqual(summary["diagnostics"]["CUSIP_FROM_NAME_MATCH"], 1)
 
+    def test_market_fields_are_shared(self):
+        m_result = {"contract": {"market_state": "CONFIRMED_UPTREND", "m_data_integrity": "VERIFIED"},
+                    "score": {"m_score_v1": {"normalized_score": 92.0}, "m_classic": {"result": "PASS"}}}
+        rows = run_batch(["A", "B"], as_of=AS_OF, evaluate=lambda ticker, as_of: (
+            *fake_result(70.0), None, None, None, None, m_result))
+        self.assertEqual({row["m_market_state"] for row in rows}, {"CONFIRMED_UPTREND"})
+        self.assertEqual(summarize(rows)["market"]["m_score"], 92.0)
+
 
 if __name__ == "__main__":
     unittest.main()
