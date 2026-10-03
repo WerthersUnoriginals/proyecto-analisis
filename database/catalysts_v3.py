@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Iterable
 from zoneinfo import ZoneInfo
 
-CATALYSTS_VERSION = "sec-catalysts-v1"
+CATALYSTS_VERSION = "sec-catalysts-v2"
 CATALYST_ITEMS = {"5.02": "MANAGEMENT_CHANGE", "2.01": "ACQUISITION_OR_DISPOSITION"}
 CATALYST_FORMS = frozenset({"8-K", "8-K/A"})
 WINDOW_DAYS = 365
@@ -29,10 +29,13 @@ class CatalystFiling:
     filing_date: date
     acceptance_at: datetime | None
     items: tuple[str, ...]
+    # Distinct acceptance times observed by ``as_of``; SEC sometimes serves a
+    # value shifted by the New York offset (spec 2026-10-03 §14).
+    acceptance_values: int = 1
 
 
 def available_at(filing: CatalystFiling) -> datetime:
-    """Acceptance time, or the end of the EDGAR filing day when it is missing.
+    """Latest observed acceptance time, or the end of the EDGAR filing day.
 
     The fallback is never earlier than the real acceptance, so it cannot leak
     a filing into an earlier ``as_of``.
@@ -56,6 +59,8 @@ def select_catalysts(filings: Iterable[CatalystFiling], as_of: datetime) -> dict
         selected = [item for item in filing.items if item in CATALYST_ITEMS]
         if selected and filing.acceptance_at is None:
             diagnostics.append(f"ACCEPTANCE_MISSING:{filing.accession}")
+        if selected and filing.acceptance_values > 1:
+            diagnostics.append(f"ACCEPTANCE_INCONSISTENT:{filing.accession}")
         for item in selected:
             events.append({
                 "item": item,

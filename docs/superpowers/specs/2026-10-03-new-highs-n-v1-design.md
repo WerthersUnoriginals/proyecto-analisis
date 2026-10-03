@@ -224,3 +224,26 @@ reasons, as in C/A.
   before the last bar) and requires the first bar within 10 days of its start.
 - **Exchange timezone** of stored bars is not yet read back; the series
   assumes `America/New_York`, true for every supported (domestic) company.
+
+## 14. Acceptance observations (human decision 2026-10-03)
+
+The live run (`docs/audits/2026-10-03-n-live-26-companies.md`, finding 2)
+showed that SEC submissions sometimes serve `acceptanceDateTime` shifted by
+the New York UTC offset, and that the same filing can change between days.
+Decision: keep every observation; never fail on it; never infer the truth.
+
+- **Storage** (migration `2026-10-03_filing_acceptance_observations_v1.sql`):
+  `sec_filing_acceptance_observations(company_id, accession, acceptance_at,
+  observed_at, run_id)`, append-only, one row per distinct value of a filing
+  (first observation kept), foreign key to `sec_filings`. The migration copies
+  the values already stored in `sec_filings` as their first observations.
+- **Ingestion** (`sec-submissions-v3`): a changed acceptance time is a new
+  observation, not a conflict. A changed form or filing date still fails the
+  run with `EVIDENCE_CONFLICT`. `sec_filings.acceptance_at` keeps its first
+  value and is no longer read by N.
+- **Catalysts** (`sec-catalysts-v2`): a filing is available at the **latest**
+  acceptance observed by `as_of` (the conservative choice: a wrong value is
+  always later than the truth, so this can delay a catalyst but never leak
+  one). More than one distinct value adds `ACCEPTANCE_INCONSISTENT:<accession>`
+  to the catalyst diagnostics. With no visible observation, the end of the
+  filing day applies, as before, with `ACCEPTANCE_MISSING`.

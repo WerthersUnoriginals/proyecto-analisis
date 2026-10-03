@@ -41,6 +41,26 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(calls, [("ingest", "AAA"), ("evaluate", "AAA")])
         self.assertIsNone(rows[0]["error"])
 
+    def test_default_as_of_is_taken_after_all_ingestion(self):
+        events = []
+        clock = lambda: events.append("clock") or datetime(2026, 10, 3, 20, tzinfo=UTC)
+        seen = []
+        run_batch(["AAA", "BBB"], as_of=None, clock=clock, ingest=lambda ticker: events.append(f"ingest:{ticker}"),
+                  evaluate=lambda ticker, as_of: seen.append(as_of) or fake_result(1.0))
+        self.assertEqual(events, ["ingest:AAA", "ingest:BBB", "clock"])
+        self.assertEqual(seen, [datetime(2026, 10, 3, 20, tzinfo=UTC)] * 2)
+
+    def test_failed_ingestion_is_reported_and_not_evaluated(self):
+        def ingest(ticker):
+            if ticker == "BAD":
+                raise RuntimeError("down")
+
+        evaluated = []
+        rows = run_batch(["BAD", "OK"], as_of=AS_OF, ingest=ingest,
+                         evaluate=lambda ticker, as_of: evaluated.append(ticker) or fake_result(1.0))
+        self.assertEqual(rows[0]["error"], "RuntimeError")
+        self.assertEqual(evaluated, ["OK"])
+
     def test_summary_counts_statuses(self):
         rows = run_batch(["A", "B"], as_of=AS_OF,
                          evaluate=lambda ticker, as_of: fake_result(70.0, "REVIEW_REQUIRED" if ticker == "B" else "VERIFIED"))

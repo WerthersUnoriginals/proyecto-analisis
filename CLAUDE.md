@@ -33,8 +33,11 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   conversión con `split-basis-v1`), `new_highs_v1.py`, `catalysts_v3.py` (8-K
   5.02/2.01, informativos), `n_contract_v1.py`, `n_v3_runner.py`, ingesta
   `yfinance.daily_bars` e items 8-K; N Score v1 (`n_score_v1.py`, `n-1.0-exp`,
-  pesos aprobados). **Pendiente:** aplicar migración
-  `2026-10-03_price_bars_v1` e ingesta/ejecución real.
+  pesos aprobados). Migraciones `2026-10-03_price_bars_v1` y
+  `2026-10-03_filing_acceptance_observations_v1` aplicadas; ejecución real en
+  26 empresas (`docs/audits/2026-10-03-n-live-26-companies.md`). SEC sirve a
+  veces `acceptanceDateTime` desplazado por la zona de Nueva York: se guarda
+  cada observación y los catalizadores usan la más tardía (spec N §14).
 - S, L, I, M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
@@ -68,7 +71,8 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
     anclado), `a_contract_v1.py`, `a_v3_runner.py`
     (`python -m database.a_v3_runner AAPL`).
   - N: `prices_v3.py`, `new_highs_v1.py`, `catalysts_v3.py`, `n_contract_v1.py`,
-    `n_v3_runner.py` (`python -m database.n_v3_runner NVDA`).
+    `n_v3_runner.py` (`python -m database.n_v3_runner NVDA`); `batch_v3` sin
+    `--as-of` evalúa tras la ingesta.
   - `migrations/` — migraciones versionadas `YYYY-MM-DD_nombre_vN.sql`. Nunca editar una existente.
 - `fixtures/` — líneas base congeladas (AAPL) y Company Facts reales recortados
   (AAPL, NVDA, 2026-10-02) para tests offline de v3.

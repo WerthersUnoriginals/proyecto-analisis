@@ -202,7 +202,33 @@ class EvidenceRepositoryIntegrationTests(unittest.TestCase):
         self.cursor.execute(evidence_v3.LOAD_CATALYST_FILINGS_SQL,
                             {"company_id": COMPANY_ID, "as_of": OBSERVED, "since": date(2000, 1, 1)})
         rows = [row for row in self.cursor.fetchall() if row[1] == "TEST-0000000003"]
-        self.assertEqual([row[5] for row in rows], ["5.02", "9.01"])
+        self.assertEqual([row[6] for row in rows], ["5.02", "9.01"])
+
+    def test_changed_acceptance_is_a_new_observation_not_a_conflict(self):
+        run = self.run_id()
+        accepted = datetime(2000, 6, 1, 13, tzinfo=UTC)
+        filing = FilingRecord("TEST-0000000005", "8-K", date(2000, 6, 1), accepted, None, ("5.02",))
+        shifted = FilingRecord("TEST-0000000005", "8-K", date(2000, 6, 1), accepted + timedelta(hours=4), None, ("5.02",))
+        later = OBSERVED + timedelta(days=1)
+        for record, observed in ((filing, OBSERVED), (filing, OBSERVED), (shifted, later)):
+            evidence_v3.insert_filings(self.cursor, company_id=COMPANY_ID, cik=CIK, filings=[record],
+                                       observed_at=observed, run_id=run)
+            evidence_v3.insert_acceptance_observations(self.cursor, company_id=COMPANY_ID, filings=[record],
+                                                       observed_at=observed, run_id=run)
+        evidence_v3.insert_filing_items(self.cursor, company_id=COMPANY_ID, filings=[filing],
+                                        observed_at=OBSERVED, run_id=run)
+        changed_form = FilingRecord("TEST-0000000005", "8-K/A", date(2000, 6, 1), accepted, None, ())
+        with self.assertRaises(evidence_v3.EvidenceConflict):
+            evidence_v3.insert_filings(self.cursor, company_id=COMPANY_ID, cik=CIK, filings=[changed_form],
+                                       observed_at=later, run_id=run)
+        load = lambda as_of: [row for row in self._catalyst_rows(as_of) if row[1] == "TEST-0000000005"]
+        self.assertEqual([(row[4], row[5]) for row in load(OBSERVED)], [(accepted, 1)])
+        self.assertEqual([(row[4], row[5]) for row in load(later)], [(accepted + timedelta(hours=4), 2)])
+
+    def _catalyst_rows(self, as_of):
+        self.cursor.execute(evidence_v3.LOAD_CATALYST_FILINGS_SQL,
+                            {"company_id": COMPANY_ID, "as_of": as_of, "since": date(2000, 1, 1)})
+        return self.cursor.fetchall()
 
 
 if __name__ == "__main__":

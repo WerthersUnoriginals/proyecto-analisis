@@ -26,7 +26,7 @@ from database.sec_facts import CATALOG_VERSION, parse_companyfacts
 from database.sec_xbrl_instance import parse_xbrl_instance
 
 SEC_FACTS_CONTRACT = f"sec-companyfacts-raw-v1/{CATALOG_VERSION}"
-SEC_FILINGS_CONTRACT = "sec-submissions-v2"  # v2 also stores literal 8-K items
+SEC_FILINGS_CONTRACT = "sec-submissions-v3"  # 8-K items (v2) and acceptance observations (v3)
 SEC_SUCCESSION_CONTRACT = "sec-succession-v1"
 SUCCESSION_JOINT_WINDOW_DAYS = (30, 400)
 SUCCESSION_MAX_HEADERS = 4
@@ -187,10 +187,14 @@ def _ingest_submissions(company_id, cik, clock, connection_factory, sec_getter):
         inserted, existing = evidence_v3.insert_filings(
             cursor, company_id=company_id, cik=cik, filings=filings, observed_at=completed, run_id=run_id,
         )
+        new_acceptances = evidence_v3.insert_acceptance_observations(
+            cursor, company_id=company_id, filings=filings, observed_at=completed, run_id=run_id,
+        )
         new_items = evidence_v3.insert_filing_items(
             cursor, company_id=company_id, filings=filings, observed_at=completed, run_id=run_id,
         )
-        return {"items": len(filings), "inserted": inserted, "existing": existing, "new_8k_items": new_items}
+        return {"items": len(filings), "inserted": inserted, "existing": existing,
+                "new_acceptance_values": new_acceptances, "new_8k_items": new_items}
 
     return _run_operation(
         company_id, "SEC", "sec.submissions", SEC_FILINGS_CONTRACT,

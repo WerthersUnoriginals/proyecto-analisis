@@ -286,7 +286,10 @@ class IngestOrchestrationTests(unittest.TestCase):
         items = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.sec_filing_items")]
         self.assertEqual([(params[1], params[2]) for params in items], [("k", "5.02"), ("k", "9.01")])
         contracts = {params[2]: params[3] for params in db.runs()}
-        self.assertEqual(contracts["sec.submissions"], "sec-submissions-v2")
+        self.assertEqual(contracts["sec.submissions"], "sec-submissions-v3")
+        observations = [params for sql, params in db.statements
+                        if sql.startswith("INSERT INTO public.sec_filing_acceptance_observations")]
+        self.assertEqual([params[1] for params in observations], ["a", "k"])
 
     def test_daily_bars_are_stored_without_the_partial_session(self):
         db, result = self.run_ingest(stock=PriceStock())

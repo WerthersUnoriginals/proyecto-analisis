@@ -70,6 +70,17 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(len(result["events"]), 1)
         self.assertIn("ACCEPTANCE_MISSING:x", result["diagnostics"])
 
+    def test_version(self):
+        self.assertEqual(CATALYSTS_VERSION, "sec-catalysts-v2")
+
+    def test_inconsistent_acceptance_is_flagged(self):
+        item = CatalystFiling(cik="0001045810", accession="y", form="8-K", filing_date=date(2026, 9, 1),
+                              acceptance_at=datetime(2026, 9, 1, 21, tzinfo=UTC), items=("5.02",),
+                              acceptance_values=2)
+        result = select_catalysts([item], AS_OF)
+        self.assertEqual(len(result["events"]), 1)
+        self.assertIn("ACCEPTANCE_INCONSISTENT:y", result["diagnostics"])
+
     def test_other_forms_are_ignored(self):
         result = select_catalysts([filing("k", date(2026, 9, 1), ["5.02"], form="10-K")], AS_OF)
         self.assertEqual(result["events"], [])

@@ -5,6 +5,8 @@ Usage::
     python -m database.batch_v3 AAPL MSFT NVDA [--ingest] [--file tickers.txt] [--out report.json]
 
 One company failing never stops the batch; its error is reported in its row.
+Without ``--as-of``, the evaluation time is taken after ingestion: an ``as_of``
+fixed before ingesting would, correctly, hide everything just observed.
 """
 
 from __future__ import annotations
@@ -76,23 +78,42 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
     }
 
 
+def _error_row(ticker: str, error: Exception) -> dict:
+    return {"ticker": ticker, "error": type(error).__name__,
+            "error_detail": traceback.format_exception_only(error)[-1].strip()[:300]}
+
+
 def run_batch(
     tickers: Iterable[str],
     *,
-    as_of: datetime,
+    as_of: datetime | None,
     ingest: Callable | None = None,
     evaluate: Callable = _default_evaluate,
+    clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> list[dict]:
+    """Ingest every ticker first, then evaluate all of them at one ``as_of``.
+
+    ``as_of=None`` evaluates at the clock time after ingestion.
+    """
+
+    tickers = [ticker.strip().upper() for ticker in tickers]
+    failed: dict[str, dict] = {}
+    if ingest is not None:
+        for ticker in tickers:
+            try:
+                ingest(ticker)
+            except Exception as error:  # one company never stops the batch
+                failed[ticker] = _error_row(ticker, error)
+    as_of = as_of or clock()
     rows = []
     for ticker in tickers:
-        ticker = ticker.strip().upper()
+        if ticker in failed:
+            rows.append(failed[ticker])
+            continue
         try:
-            if ingest is not None:
-                ingest(ticker)
             rows.append(_row(ticker, *evaluate(ticker, as_of)))
         except Exception as error:  # one company never stops the batch
-            rows.append({"ticker": ticker, "error": type(error).__name__,
-                         "error_detail": traceback.format_exception_only(error)[-1].strip()[:300]})
+            rows.append(_error_row(ticker, error))
     return rows
 
 
@@ -129,8 +150,15 @@ def main(argv=None):
     tickers = list(args.tickers)
     if args.file:
         tickers += [line.strip() for line in Path(args.file).read_text(encoding="utf-8").splitlines() if line.strip()]
-    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.now(timezone.utc)
-    rows = run_batch(tickers, as_of=as_of, ingest=_default_ingest if args.ingest else None)
+    fixed_as_of = datetime.fromisoformat(args.as_of) if args.as_of else None
+    evaluated_at = []
+
+    def evaluate(ticker, as_of):
+        evaluated_at.append(as_of)
+        return _default_evaluate(ticker, as_of)
+
+    rows = run_batch(tickers, as_of=fixed_as_of, ingest=_default_ingest if args.ingest else None, evaluate=evaluate)
+    as_of = evaluated_at[0] if evaluated_at else fixed_as_of or datetime.now(timezone.utc)
     summary = summarize(rows)
     for row in rows:
         if row.get("error"):

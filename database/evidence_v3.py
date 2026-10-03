@@ -103,7 +103,7 @@ INSERT_FILING_SQL = """
 """
 
 FIND_FILING_SQL = """
-    SELECT form, filing_date, acceptance_at FROM public.sec_filings
+    SELECT form, filing_date FROM public.sec_filings
     WHERE company_id = %s AND accession = %s;
 """
 
@@ -122,7 +122,9 @@ def insert_filings(
             continue
         cursor.execute(FIND_FILING_SQL, (company_id, filing.accession))
         row = cursor.fetchone()
-        if row is None or (row[0], row[1], row[2]) != (filing.form, filing.filing_date, filing.acceptance_at):
+        # Acceptance times are not compared: SEC serves inconsistent values,
+        # kept as observations (insert_acceptance_observations).
+        if row is None or (row[0], row[1]) != (filing.form, filing.filing_date):
             raise EvidenceConflict(f"SEC filing metadata changed: {filing.accession}")
         existing += 1
     return inserted, existing
@@ -285,6 +287,29 @@ def load_company(ticker: str, *, connection_factory: Callable | None = None) -> 
     return rows[0] if rows else None
 
 
+INSERT_ACCEPTANCE_SQL = """
+    INSERT INTO public.sec_filing_acceptance_observations (company_id, accession, acceptance_at, observed_at, run_id)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (company_id, accession, acceptance_at) DO NOTHING
+    RETURNING id;
+"""
+
+
+def insert_acceptance_observations(
+    cursor, *, company_id: int, filings: Iterable[FilingRecord], observed_at: datetime, run_id: int,
+) -> int:
+    """Store each distinct acceptance time once; returns how many were new."""
+
+    inserted = 0
+    for filing in filings:
+        if filing.acceptance_at is None:
+            continue
+        cursor.execute(INSERT_ACCEPTANCE_SQL, (company_id, filing.accession, filing.acceptance_at, observed_at, run_id))
+        if cursor.fetchone() is not None:
+            inserted += 1
+    return inserted
+
+
 INSERT_FILING_ITEM_SQL = """
     INSERT INTO public.sec_filing_items (company_id, accession, item, observed_at, run_id)
     VALUES (%s, %s, %s, %s, %s)
@@ -308,9 +333,14 @@ def insert_filing_items(
 
 
 LOAD_CATALYST_FILINGS_SQL = """
-    SELECT f.cik, f.accession, f.form, f.filing_date, f.acceptance_at, i.item
+    SELECT f.cik, f.accession, f.form, f.filing_date, a.latest, a.distinct_values, i.item
     FROM public.sec_filing_items AS i
     JOIN public.sec_filings AS f ON f.company_id = i.company_id AND f.accession = i.accession
+    CROSS JOIN LATERAL (
+        SELECT MAX(o.acceptance_at) AS latest, COUNT(*) AS distinct_values
+        FROM public.sec_filing_acceptance_observations AS o
+        WHERE o.company_id = f.company_id AND o.accession = f.accession AND o.observed_at <= %(as_of)s
+    ) AS a
     WHERE i.company_id = %(company_id)s AND i.observed_at <= %(as_of)s AND f.observed_at <= %(as_of)s
       AND f.form IN ('8-K', '8-K/A') AND f.filing_date >= %(since)s
     ORDER BY f.filing_date, f.accession, i.item;
@@ -325,12 +355,12 @@ def load_catalyst_filings(company_id: int, as_of: datetime, since: date, *,
         cursor.execute(LOAD_CATALYST_FILINGS_SQL, {"company_id": company_id, "as_of": as_of, "since": since})
         rows = cursor.fetchall()
     grouped: dict[str, list] = {}
-    for cik, accession, form, filing_date, acceptance_at, item in rows:
-        grouped.setdefault(accession, [cik, form, filing_date, acceptance_at, []])[4].append(item)
+    for cik, accession, form, filing_date, acceptance_at, values, item in rows:
+        grouped.setdefault(accession, [cik, form, filing_date, acceptance_at, values, []])[5].append(item)
     return [
         CatalystFiling(cik=cik, accession=accession, form=form, filing_date=filing_date,
-                       acceptance_at=acceptance_at, items=tuple(items))
-        for accession, (cik, form, filing_date, acceptance_at, items) in grouped.items()
+                       acceptance_at=acceptance_at, items=tuple(items), acceptance_values=max(values, 1))
+        for accession, (cik, form, filing_date, acceptance_at, values, items) in grouped.items()
     ]
 
 
