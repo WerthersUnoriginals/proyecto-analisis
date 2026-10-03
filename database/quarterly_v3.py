@@ -470,37 +470,71 @@ def _resolve_sec_tag_interval(
     return latest[-1]
 
 
-def _verify_provider_only_events(
-    facts: Sequence[SecFact], events: Sequence[SplitEvent], acc: _Accumulator,
-) -> None:
-    """Confirm or contradict provider-only splits with SEC original/restated pairs."""
+SHARES_RATIO_TOLERANCE = Decimal("0.01")
+EPS_RATIO_TOLERANCE = Decimal("0.03")
+
+
+def _pair_verdicts(facts: Sequence[SecFact], event: SplitEvent, metrics, tolerance: Decimal) -> set[str]:
+    """Compare values published before and after ``event`` for the same interval."""
 
     by_interval: dict[tuple[str, Interval], list[SecFact]] = defaultdict(list)
     for fact in facts:
-        if fact.metric in PER_SHARE_METRICS and duration_class(fact) == "QUARTER":
+        if fact.metric in metrics and duration_class(fact) == "QUARTER":
             by_interval[(fact.tag, _interval(fact))].append(fact)
+    verdicts = set()
+    for group in by_interval.values():
+        before = [fact for fact in group if fact.filed_date < event.event_date - timedelta(days=7)]
+        after = [fact for fact in group if fact.filed_date > event.event_date + timedelta(days=7)]
+        if not before or not after:
+            continue
+        first = max(before, key=lambda fact: fact.filed_date)
+        second = min(after, key=lambda fact: fact.filed_date)
+        if first.value <= 0 or second.value <= 0:
+            continue
+        # Shares grow by the ratio after a split; per-share values shrink by it.
+        if first.metric in SHARE_COUNT_METRICS:
+            observed = second.value / first.value
+        else:
+            observed = first.value / second.value
+        if abs(observed / event.ratio - 1) <= tolerance:
+            verdicts.add("VERIFIED")
+        elif abs(observed - 1) <= tolerance:
+            verdicts.add("CONTRADICTED")
+    return verdicts
+
+
+def verify_provider_events(
+    facts: Sequence[SecFact], events: Sequence[SplitEvent], acc: "_Accumulator",
+) -> tuple[tuple[SplitEvent, ...], tuple[SplitEvent, ...]]:
+    """Split provider-only events into (applied, rejected) using SEC evidence.
+
+    Share counts are published to the unit, so they discriminate even small
+    ratios; EPS is rounded to cents and is used only when shares are silent.
+    SEC is the authority: a provider event that SEC contradicts (no change in
+    restated values) is rejected and never applied, e.g. a spin-off price
+    adjustment that yfinance lists as a 1.032 "split".
+    """
+
+    applied, rejected = [], []
     for event in events:
         if event.sources != ("YAHOO",):
+            applied.append(event)
             continue
-        verdicts = set()
-        for group in by_interval.values():
-            before = [fact for fact in group if fact.filed_date < event.event_date - timedelta(days=7)]
-            after = [fact for fact in group if fact.filed_date > event.event_date + timedelta(days=7)]
-            if not before or not after:
-                continue
-            first = max(before, key=lambda fact: fact.filed_date)
-            second = min(after, key=lambda fact: fact.filed_date)
-            if second.value == 0:
-                continue
-            observed = first.value / second.value
-            if abs(observed / event.ratio - 1) <= Decimal("0.03") or _agree("EPS_DILUTED", first.value / event.ratio, second.value):
-                verdicts.add("VERIFIED")
-            elif _agree("EPS_DILUTED", first.value, second.value):
-                verdicts.add("CONTRADICTED")
-        if "CONTRADICTED" in verdicts and "VERIFIED" not in verdicts:
-            acc.split_reasons.append("PROVIDER_SPLIT_CONTRADICTED_BY_SEC")
+        verdicts = _pair_verdicts(facts, event, SHARE_COUNT_METRICS, SHARES_RATIO_TOLERANCE)
+        if not verdicts:
+            verdicts = _pair_verdicts(facts, event, PER_SHARE_METRICS, EPS_RATIO_TOLERANCE)
+        if verdicts == {"CONTRADICTED"}:
+            rejected.append(event)
+            acc.diagnostics.append("PROVIDER_SPLIT_REJECTED_BY_SEC")
+            continue
+        if "CONTRADICTED" in verdicts:
+            acc.split_reasons.append("PROVIDER_SPLIT_CONTRADICTORY_EVIDENCE")
         elif "VERIFIED" in verdicts:
             acc.diagnostics.append("PROVIDER_SPLIT_VERIFIED_BY_PAIRS")
+        else:
+            acc.diagnostics.append("PROVIDER_SPLIT_NOT_YET_VERIFIABLE")
+        applied.append(event)
+    return tuple(applied), tuple(rejected)
 
 
 def _sec_quarter_values(
@@ -694,7 +728,8 @@ def _priority(item: QuarterValue) -> tuple:
     if item.source == "SEC":
         catalog = SEC_TAG_CATALOG[item.metric]
         rank = catalog.index(item.concept) if item.concept in catalog else len(catalog)
-        return (0 if item.kind == "REPORTED" else 1, rank)
+        # Concept first (the right line item), then reported before derived.
+        return (0, rank, 0 if item.kind == "REPORTED" else 1)
     return (2, 0 if item.concept.endswith(("DilutedEPS", "TotalRevenue", "NetIncome")) else 1)
 
 
@@ -705,6 +740,7 @@ class QuarterlyView:
     calendar: FiscalCalendar
     diagnostics: tuple[str, ...]
     split_status_reasons: tuple[str, ...]
+    rejected_split_events: tuple[SplitEvent, ...] = ()
 
     def effective(self, metric: str) -> dict[QuarterKey, QuarterValue]:
         return {
@@ -797,7 +833,7 @@ def build_quarterly_view(
     acc = _Accumulator()
     calendar = build_fiscal_calendar(facts)
     acc.diagnostics.extend(calendar.reasons)
-    _verify_provider_only_events(value_facts, events, acc)
+    events, rejected = verify_provider_events(value_facts, events, acc)
     sec_values = _sec_quarter_values(value_facts, calendar, events, as_of_date, acc, window_start)
     derived = _derived_q4_values(value_facts, calendar, sec_values, acc)
     yahoo_values = _yahoo_quarter_values(list(yahoo_rows), facts, events, as_of, acc)
@@ -815,4 +851,5 @@ def build_quarterly_view(
         calendar=calendar,
         diagnostics=tuple(dict.fromkeys(acc.diagnostics)),
         split_status_reasons=tuple(dict.fromkeys(acc.split_reasons)),
+        rejected_split_events=rejected,
     )

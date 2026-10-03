@@ -23,6 +23,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   de Codex del 2026-09-28 queda como histórico superado). Contrato
   `a-input-contract-v1` y A Score v1 (`a-1.0-exp`, pesos aprobados).
   Live 2026-10-02: AAPL 43.92 POOR, MSFT 88.31 VERY_STRONG, NVDA 100 EXCEPTIONAL.
+- **Validación en 26 empresas** (`docs/audits/2026-10-02-validation-26-companies.md`):
+  catálogo v5 (ventas totales, banca, utilities), XBRL del filing cuando la API
+  de SEC va con retraso, sucesiones de registrante (XOM), emisores extranjeros
+  excluidos explícitamente, splits del proveedor verificados contra SEC.
 - N, S, L, I, M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
@@ -46,7 +50,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
     `quarterly_v3.py` (calendario fiscal, Q4, selección, crecimiento),
     `c_contract_v3.py`, `providers_v3.py`, `evidence_v3.py`,
     `ingest_v3.py` (`python -m database.ingest_v3 AAPL NVDA:0001045810`),
-    `c_v3_runner.py` (`python -m database.c_v3_runner AAPL [--as-of ISO]`).
+    `c_v3_runner.py` (`python -m database.c_v3_runner AAPL [--as-of ISO]`),
+    `sec_xbrl_instance.py` (XBRL del propio filing), `registrant_v3.py`
+    (emisor extranjero, sucesiones), `batch_v3.py`
+    (`python -m database.batch_v3 AAPL MSFT [--ingest] [--file f] [--out r.json]`).
   - A: `annual_v3.py` (años fiscales reales, ROE sobre patrimonio medio, CAGR
     anclado), `a_contract_v1.py`, `a_v3_runner.py`
     (`python -m database.a_v3_runner AAPL`).
@@ -60,13 +67,14 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~525 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~563 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3
 ```
 
-- Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`. Usa la BD real
+- Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`
+  (v3: `test_evidence_v3_postgres_integration`, transacción revertida, sin rastro). Usa la BD real
   `canslim` (usuario `canslim_app`, PostgreSQL 17) con preflight de identidad y
   UIDs de prueba reservados. Ejecutar sólo con autorización explícita.
 - `test_c_score_*`, `test_sec_history`, `test_splits`, `test_yahoo_historico` son

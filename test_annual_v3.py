@@ -97,6 +97,37 @@ class RoeTests(unittest.TestCase):
         self.assertEqual(roe.status, "NOT_MEANINGFUL")
         self.assertIsNone(roe.value_pct)
 
+    def including_nci_company(self, profit_loss):
+        facts = annual_company({2024: "1", 2025: "1"}, net_income={2024: "10", 2025: "30"})
+        for year, value in ((2024, "100"), (2025, "200")):
+            facts.append(fact("StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest", None,
+                              date(year, 12, 31), value, accession=f"k{year}", filed=date(year + 1, 2, 20),
+                              fy=year, fp="FY", form="10-K", unit="USD"))
+        if profit_loss is not None:
+            facts.append(fact("ProfitLoss", date(2025, 1, 1), date(2025, 12, 31), profit_loss,
+                              accession="k2025", filed=date(2026, 2, 20), fy=2025, fp="FY", form="10-K"))
+        return facts
+
+    def test_second_pair_is_tried_when_the_first_lacks_equity(self):
+        roe = build_annual_view(self.including_nci_company("30"), split_events=(), as_of=AS_OF).roe(2025)
+        self.assertEqual(roe.status, "OK")
+        self.assertEqual(roe.value_pct, Decimal("20"))
+        self.assertEqual(roe.concepts, ("ProfitLoss",
+                                        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"))
+
+    def test_cross_pair_only_when_sec_shows_no_minority_interest(self):
+        # RIVN: NetIncomeLoss plus equity tagged only "including NCI". Without ProfitLoss
+        # evidence the minority share is unknown, so ROE stays unavailable.
+        roe = build_annual_view(self.including_nci_company(None), split_events=(), as_of=AS_OF).roe(2025)
+        self.assertEqual(roe.status, "NO_DATA")
+
+    def test_minority_interest_blocks_the_cross_pair(self):
+        facts = self.including_nci_company("33")  # ProfitLoss 33 != NetIncomeLoss 30
+        roe = build_annual_view(facts, split_events=(), as_of=AS_OF).roe(2025)
+        self.assertEqual(roe.concepts, ("ProfitLoss",
+                                        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"))
+        self.assertEqual(roe.value_pct, Decimal("22"))  # 33 / 150, consistent pair only
+
     def test_missing_opening_equity_is_no_data(self):
         facts = annual_company({2025: "1"}, net_income={2025: "30"}, equity={2025: "200"})
         self.assertEqual(build_annual_view(facts, split_events=(), as_of=AS_OF).roe(2025).status, "NO_DATA")

@@ -14,15 +14,21 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Mapping
 
-CATALOG_VERSION = "sec-tag-catalog-v4"
+CATALOG_VERSION = "sec-tag-catalog-v5"
 
 # Ordered by preference within each metric.
 SEC_TAG_CATALOG: Mapping[str, tuple[str, ...]] = {
     "EPS_DILUTED": ("EarningsPerShareDiluted", "EarningsPerShareBasicAndDiluted"),
     "EPS_BASIC": ("EarningsPerShareBasic",),
+    # Totals first. Contract revenue (ASC 606) is a subset when a company also
+    # reports a total (BRK: Revenues 101.8B vs contract revenue 70.1B); banks
+    # report net revenue and utilities operating revenue under their own tags.
     "REVENUE": (
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
+        "RevenuesNetOfInterestExpense",
+        "RegulatedAndUnregulatedOperatingRevenue",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
     ),
@@ -79,6 +85,7 @@ class SecFact:
     frame: str | None
     observed_at: datetime | None = None
     id: int | None = None
+    origin: str = "sec.company_facts"
 
     @property
     def identity(self) -> tuple:

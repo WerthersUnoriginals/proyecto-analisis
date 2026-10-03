@@ -58,8 +58,8 @@ INSERT_SEC_FACT_SQL = """
     INSERT INTO public.sec_companyfacts_raw (
         company_id, cik, taxonomy, tag, unit, period_start, period_end, value,
         accession, fiscal_year, fiscal_period, form, filed_date, frame,
-        catalog_version, observed_at, run_id
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        catalog_version, observed_at, run_id, origin
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT DO NOTHING
     RETURNING id;
 """
@@ -79,7 +79,7 @@ def insert_sec_facts(
         cursor.execute(INSERT_SEC_FACT_SQL, (
             company_id, cik, fact.taxonomy, fact.tag, fact.unit, fact.period_start, fact.period_end,
             fact.value, fact.accession, fact.fiscal_year, fact.fiscal_period, fact.form,
-            fact.filed_date, fact.frame, CATALOG_VERSION, observed_at, run_id,
+            fact.filed_date, fact.frame, CATALOG_VERSION, observed_at, run_id, fact.origin,
         ))
         if cursor.fetchone() is not None:
             inserted += 1
@@ -147,7 +147,7 @@ def _plain_decimal(value) -> Decimal:
 
 LOAD_SEC_FACTS_SQL = """
     SELECT id, taxonomy, tag, unit, period_start, period_end, value, accession,
-           fiscal_year, fiscal_period, form, filed_date, frame, observed_at
+           fiscal_year, fiscal_period, form, filed_date, frame, observed_at, origin
     FROM public.sec_companyfacts_raw
     WHERE company_id = %s AND observed_at <= %s
     ORDER BY id;
@@ -162,7 +162,7 @@ def load_sec_facts(company_id: int, as_of: datetime, *, connection_factory: Call
                 taxonomy=row[1], tag=row[2], unit=row[3], period_start=row[4], period_end=row[5],
                 value=_plain_decimal(row[6]),
                 accession=row[7], fiscal_year=row[8], fiscal_period=row[9], form=row[10],
-                filed_date=row[11], frame=row[12], observed_at=row[13], id=row[0],
+                filed_date=row[11], frame=row[12], observed_at=row[13], id=row[0], origin=row[14],
             )
             for row in cursor.fetchall()
         ]
@@ -196,6 +196,84 @@ def load_yahoo_rows(company_id: int, as_of: datetime, *, connection_factory: Cal
         cursor.execute(LOAD_YAHOO_ROWS_SQL, {"company_id": company_id, "as_of": as_of})
         columns = [description.name for description in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+
+LOAD_PERIODIC_WITHOUT_FACTS_SQL = """
+    SELECT f.accession, f.form, f.filing_date
+    FROM public.sec_filings AS f
+    WHERE f.company_id = %s
+      AND f.form IN ('10-Q', '10-Q/A', '10-K', '10-K/A')
+      AND f.filing_date >= %s
+      AND NOT EXISTS (
+          SELECT 1 FROM public.sec_companyfacts_raw AS r
+          WHERE r.company_id = f.company_id AND r.accession = f.accession
+      )
+    ORDER BY f.filing_date;
+"""
+
+
+def load_periodic_filings_without_facts(cursor, company_id: int, since: date) -> list[tuple[str, str, date]]:
+    cursor.execute(LOAD_PERIODIC_WITHOUT_FACTS_SQL, (company_id, since))
+    return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+
+
+INSERT_LINK_SQL = """
+    INSERT INTO public.registrant_links (
+        company_id, successor_cik, predecessor_cik, succession_form, succession_accession,
+        succession_date, status, evidence, observed_at, run_id
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT DO NOTHING
+    RETURNING id;
+"""
+
+
+def insert_registrant_link(cursor, *, company_id: int, link, evidence: Mapping, observed_at: datetime, run_id: int) -> bool:
+    cursor.execute(INSERT_LINK_SQL, (
+        company_id, link.successor_cik, link.predecessor_cik, link.succession_form,
+        link.succession_accession, link.succession_date, link.status, _jsonb(dict(evidence)),
+        observed_at, run_id,
+    ))
+    return cursor.fetchone() is not None
+
+
+def load_registrant_links(company_id: int, as_of: datetime, *, connection_factory: Callable | None = None):
+    from database.registrant_v3 import RegistrantLink
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT DISTINCT successor_cik, predecessor_cik, succession_form, succession_accession,
+                      succession_date, status
+               FROM public.registrant_links WHERE company_id = %s AND observed_at <= %s;""",
+            (company_id, as_of),
+        )
+        return [RegistrantLink(*row) for row in cursor.fetchall()]
+
+
+def load_registrant_filings(cursor, company_id: int, cik: str) -> list[tuple[str, date, str]]:
+    cursor.execute(
+        "SELECT form, filing_date, accession FROM public.sec_filings WHERE company_id = %s AND cik = %s;",
+        (company_id, cik),
+    )
+    return [(row[0], row[1], row[2]) for row in cursor.fetchall()]
+
+
+def load_linked_predecessors(cursor, company_id: int) -> list[str]:
+    cursor.execute(
+        "SELECT DISTINCT predecessor_cik FROM public.registrant_links WHERE company_id = %s AND status = 'LINKED';",
+        (company_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+def load_filing_forms(company_id: int, as_of: datetime, *, connection_factory: Callable | None = None) -> list[tuple[str, date]]:
+    """Official EDGAR filing metadata observed at ``as_of``: (form, filing_date)."""
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT form, filing_date FROM public.sec_filings WHERE company_id = %s AND observed_at <= %s;",
+            (company_id, as_of),
+        )
+        return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
 def load_company(ticker: str, *, connection_factory: Callable | None = None) -> tuple[int, str | None] | None:

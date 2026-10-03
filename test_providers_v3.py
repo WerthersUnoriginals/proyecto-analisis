@@ -115,6 +115,10 @@ class FakeCursor:
         elif "RETURNING id" in text:
             self.db.next_id += 1
             self.result = [(self.db.next_id,)]
+        elif "FROM public.sec_filings AS f" in text:
+            self.result = list(self.db.pending)
+        elif text.startswith("SELECT form, filing_date, accession FROM public.sec_filings"):
+            self.result = list(self.db.registrant_filings) if params[1] == "0001045810" else []
         elif text.startswith("SELECT id FROM fundamentals_raw"):
             self.result = [(1,)]
         else:
@@ -147,6 +151,8 @@ class FakeDb:
         self.statements = []
         self.next_id = 100
         self.transactions = 0
+        self.pending = []
+        self.registrant_filings = []
 
     def connect(self):
         return FakeConnection(self)
@@ -160,6 +166,18 @@ class IngestOrchestrationTests(unittest.TestCase):
         payload = json.loads((FIXTURES / "sec_companyfacts_nvda_2026-10-02.json").read_text(encoding="utf-8"))
 
         def getter(url):
+            if url.endswith("-index-headers.html"):
+                return (b"FILER:\n COMPANY CONFORMED NAME: OLD CO\n CENTRAL INDEX KEY: 0000034088\n"
+                        b"FILER:\n COMPANY CONFORMED NAME: NEW CO\n CENTRAL INDEX KEY: 0001045810\n")
+            if "CIK0000034088.json" in url and "submissions" in url:
+                return {"cik": "0000034088", "name": "OLD CO", "tickers": [], "exchanges": [],
+                        "filings": {"recent": arrays(("old-k", "2026-02-18", "", "2026-02-18T21:00:00.000Z", "10-K"))}}
+            if "CIK0000034088.json" in url and "companyfacts" in url:
+                return {"cik": 34088, "facts": {}}
+            if url.endswith("/index.json"):
+                return {"directory": {"item": [{"name": "nee-20260630_htm.xml"}, {"name": "x.htm"}]}}
+            if url.endswith("_htm.xml"):
+                return self.instance
             if "company_tickers" in url:
                 return TICKERS
             if "companyfacts" in url:
@@ -172,8 +190,10 @@ class IngestOrchestrationTests(unittest.TestCase):
             }
         return getter
 
-    def run_ingest(self, failing=()):
+    def run_ingest(self, failing=(), pending=(), instance=None, registrant_filings=()):
         db = FakeDb()
+        db.pending = list(pending)
+        db.registrant_filings = list(registrant_filings)
         clock = iter(datetime(2026, 10, 2, 12, minute, tzinfo=UTC) for minute in range(60))
         index = pd.to_datetime(["2026-06-30"])
         series = {name: pd.Series([1.0], index=index) for name in
@@ -182,6 +202,7 @@ class IngestOrchestrationTests(unittest.TestCase):
         class Stock:
             quarterly_income_stmt = pd.DataFrame()
 
+        self.instance = instance
         result = ingest_v3.ingest_company(
             "NVDA", clock=lambda: next(clock), connection_factory=db.connect,
             sec_getter=self.sec_getter(failing),
@@ -210,6 +231,39 @@ class IngestOrchestrationTests(unittest.TestCase):
         inserts = [sql for sql, _ in db.statements if sql.startswith("INSERT INTO public.sec_companyfacts_raw")]
         self.assertEqual(len(inserts), facts_step["items"])
         self.assertGreater(facts_step["items"], 1000)
+
+    def test_lagging_filing_is_read_from_its_instance(self):
+        from test_sec_xbrl_instance import INSTANCE
+
+        instance = INSTANCE.replace(b"0000753308", b"0001045810")
+        db, result = self.run_ingest(pending=[("0001045810-26-000099", "10-Q", date(2026, 8, 26))],
+                                     instance=instance)
+        step = next(step for step in result["steps"] if step["operation"] == "sec.xbrl_instance")
+        self.assertEqual((step["status"], step["items"]), ("SUCCESS", 4))
+        inserts = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.sec_companyfacts_raw")]
+        self.assertTrue(all(params[-1] == "sec.xbrl_instance" for params in inserts[-4:]))
+
+    def test_corrupt_instance_is_recorded_not_raised(self):
+        db, result = self.run_ingest(pending=[("0001045810-26-000099", "10-Q", date(2026, 8, 26))],
+                                     instance=b"<not xml")
+        step = next(step for step in result["steps"] if step["operation"] == "sec.xbrl_instance")
+        self.assertEqual((step["status"], step["error_code"]), ("FAILED", "EVIDENCE_INVALID"))
+
+    def test_succession_links_predecessor_and_ingests_its_history(self):
+        filings = [("8-K12B", date(2026, 7, 1), "succ"), ("10-Q", date(2026, 8, 3), "joint-q")]
+        db, result = self.run_ingest(registrant_filings=filings)
+        succession = next(step for step in result["steps"] if step["operation"] == "sec.succession")
+        self.assertEqual((succession["status"], succession["linked"]), ("SUCCESS", ["0000034088"]))
+        links = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.registrant_links")]
+        self.assertEqual((links[0][2], links[0][6]), ("0000034088", "LINKED"))
+        predecessor_steps = [step for step in result["steps"] if step.get("cik") == "0000034088"]
+        self.assertEqual({step["operation"] for step in predecessor_steps}, {"sec.company_facts", "sec.submissions"})
+
+    def test_succession_without_joint_predecessor_is_recorded_unresolved(self):
+        filings = [("8-K12B", date(2026, 7, 1), "succ")]
+        db, result = self.run_ingest(registrant_filings=filings)
+        links = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.registrant_links")]
+        self.assertEqual((links[0][2], links[0][6]), (None, "PREDECESSOR_NOT_FOUND"))
 
     def test_yahoo_run_records_its_items(self):
         db, _ = self.run_ingest()

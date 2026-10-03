@@ -23,9 +23,16 @@ from typing import Callable
 from database import evidence_v3, providers_v3
 from database.providers_v3 import ProviderError
 from database.sec_facts import CATALOG_VERSION, parse_companyfacts
+from database.sec_xbrl_instance import parse_xbrl_instance
 
 SEC_FACTS_CONTRACT = f"sec-companyfacts-raw-v1/{CATALOG_VERSION}"
 SEC_FILINGS_CONTRACT = "sec-submissions-v1"
+SEC_SUCCESSION_CONTRACT = "sec-succession-v1"
+SUCCESSION_JOINT_WINDOW_DAYS = (30, 400)
+SUCCESSION_MAX_HEADERS = 4
+SUCCESSION_LOOKBACK_DAYS = round(365.25 * 8)
+SEC_INSTANCE_CONTRACT = f"sec-xbrl-instance-v1/{CATALOG_VERSION}"
+INSTANCE_LOOKBACK_DAYS = 730
 YAHOO_CONTRACT = "yahoo-quarterly-raw-v1"
 
 
@@ -81,8 +88,20 @@ def _run_operation(company_id, provider, operation, contract, fetch, persist, *,
             )
         return {"operation": operation, "status": "FAILED", "error_code": error.code}
     completed = clock()
-    with _connect(connection_factory) as connection, connection.cursor() as cursor:
-        summary = persist(cursor, payload, started, completed)
+    try:
+        with _connect(connection_factory) as connection, connection.cursor() as cursor:
+            summary = persist(cursor, payload, started, completed)
+    except (evidence_v3.EvidenceConflict, ValueError) as error:
+        # Contradictory or unreadable evidence: keep stored evidence untouched
+        # and record the attempt for audit.
+        code = "EVIDENCE_CONFLICT" if isinstance(error, evidence_v3.EvidenceConflict) else "EVIDENCE_INVALID"
+        with _connect(connection_factory) as connection, connection.cursor() as cursor:
+            evidence_v3.record_run(
+                cursor, company_id=company_id, provider=provider, operation=operation,
+                contract_version=contract, started_at=started, completed_at=clock(),
+                status="FAILED", error_code=code,
+            )
+        return {"operation": operation, "status": "FAILED", "error_code": code}
     return {"operation": operation, "status": "SUCCESS", **summary}
 
 
@@ -103,43 +122,22 @@ def ingest_company(
         cik = stored[1] if stored else None
     identity = providers_v3.resolve_company(ticker, known_cik=cik, getter=sec_getter)
     company_id = ensure_company(identity, connection_factory=connection_factory)
-    steps = []
-
-    def persist_facts(cursor, payload, started, completed):
-        facts = parse_companyfacts(payload)
-        run_id = evidence_v3.record_run(
-            cursor, company_id=company_id, provider="SEC", operation="sec.company_facts",
-            contract_version=SEC_FACTS_CONTRACT, started_at=started, completed_at=completed,
-            status="SUCCESS", error_code=None, item_count=len(facts),
-        )
-        inserted, existing = evidence_v3.insert_sec_facts(
-            cursor, company_id=company_id, cik=identity.cik, facts=facts, observed_at=completed, run_id=run_id,
-        )
-        return {"items": len(facts), "inserted": inserted, "existing": existing}
-
-    steps.append(_run_operation(
-        company_id, "SEC", "sec.company_facts", SEC_FACTS_CONTRACT,
-        lambda: providers_v3.fetch_companyfacts(identity.cik, getter=sec_getter), persist_facts,
-        clock=clock, connection_factory=connection_factory,
+    steps = [
+        _ingest_companyfacts(company_id, identity.cik, clock, connection_factory, sec_getter),
+        _ingest_submissions(company_id, identity.cik, clock, connection_factory, sec_getter),
+    ]
+    succession_steps, predecessors = _ingest_successions(
+        company_id, identity.cik, clock, connection_factory, sec_getter,
+    )
+    steps.extend(succession_steps)
+    for predecessor in predecessors:
+        steps.append({**_ingest_companyfacts(company_id, predecessor, clock, connection_factory, sec_getter),
+                      "cik": predecessor})
+        steps.append({**_ingest_submissions(company_id, predecessor, clock, connection_factory, sec_getter),
+                      "cik": predecessor})
+    steps.extend(_ingest_lagging_instances(
+        company_id, identity.cik, clock, connection_factory, sec_getter, predecessors=predecessors,
     ))
-
-    def persist_filings(cursor, filings, started, completed):
-        run_id = evidence_v3.record_run(
-            cursor, company_id=company_id, provider="SEC", operation="sec.submissions",
-            contract_version=SEC_FILINGS_CONTRACT, started_at=started, completed_at=completed,
-            status="SUCCESS", error_code=None, item_count=len(filings),
-        )
-        inserted, existing = evidence_v3.insert_filings(
-            cursor, company_id=company_id, cik=identity.cik, filings=filings, observed_at=completed, run_id=run_id,
-        )
-        return {"items": len(filings), "inserted": inserted, "existing": existing}
-
-    steps.append(_run_operation(
-        company_id, "SEC", "sec.submissions", SEC_FILINGS_CONTRACT,
-        lambda: providers_v3.fetch_filings(identity.cik, getter=sec_getter), persist_filings,
-        clock=clock, connection_factory=connection_factory,
-    ))
-
     steps.append(_ingest_yahoo_timeseries(company_id, ticker, clock, connection_factory, yahoo_fetcher))
     steps.append(_ingest_yfinance_income(company_id, ticker, clock, connection_factory, stock_factory))
 
@@ -154,6 +152,145 @@ def ingest_company(
         "outcome": split_result["repository_outcome"],
     })
     return {"ticker": ticker, "company_id": company_id, "cik": identity.cik, "steps": steps}
+
+
+def _ingest_companyfacts(company_id, cik, clock, connection_factory, sec_getter):
+    def persist(cursor, payload, started, completed):
+        facts = parse_companyfacts(payload)
+        run_id = evidence_v3.record_run(
+            cursor, company_id=company_id, provider="SEC", operation="sec.company_facts",
+            contract_version=SEC_FACTS_CONTRACT, started_at=started, completed_at=completed,
+            status="SUCCESS", error_code=None, item_count=len(facts), metadata={"cik": cik},
+        )
+        inserted, existing = evidence_v3.insert_sec_facts(
+            cursor, company_id=company_id, cik=cik, facts=facts, observed_at=completed, run_id=run_id,
+        )
+        return {"items": len(facts), "inserted": inserted, "existing": existing}
+
+    return _run_operation(
+        company_id, "SEC", "sec.company_facts", SEC_FACTS_CONTRACT,
+        lambda: providers_v3.fetch_companyfacts(cik, getter=sec_getter), persist,
+        clock=clock, connection_factory=connection_factory,
+    )
+
+
+def _ingest_submissions(company_id, cik, clock, connection_factory, sec_getter):
+    def persist(cursor, filings, started, completed):
+        run_id = evidence_v3.record_run(
+            cursor, company_id=company_id, provider="SEC", operation="sec.submissions",
+            contract_version=SEC_FILINGS_CONTRACT, started_at=started, completed_at=completed,
+            status="SUCCESS", error_code=None, item_count=len(filings), metadata={"cik": cik},
+        )
+        inserted, existing = evidence_v3.insert_filings(
+            cursor, company_id=company_id, cik=cik, filings=filings, observed_at=completed, run_id=run_id,
+        )
+        return {"items": len(filings), "inserted": inserted, "existing": existing}
+
+    return _run_operation(
+        company_id, "SEC", "sec.submissions", SEC_FILINGS_CONTRACT,
+        lambda: providers_v3.fetch_filings(cik, getter=sec_getter), persist,
+        clock=clock, connection_factory=connection_factory,
+    )
+
+
+def _ingest_successions(company_id, successor_cik, clock, connection_factory, sec_getter):
+    """Detect successor registrants and link verified predecessors (sec-succession-v1)."""
+
+    from datetime import timedelta
+
+    from database.registrant_v3 import (
+        PERIODIC_FORMS, RegistrantLink, choose_predecessors, succession_filings,
+    )
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        filings = evidence_v3.load_registrant_filings(cursor, company_id, successor_cik)
+    steps, predecessors = [], []
+    horizon = clock().date() - timedelta(days=SUCCESSION_LOOKBACK_DAYS)
+    for form, filed, accession in succession_filings(filings):
+        if filed < horizon:
+            continue
+        low = filed - timedelta(days=SUCCESSION_JOINT_WINDOW_DAYS[0])
+        high = filed + timedelta(days=SUCCESSION_JOINT_WINDOW_DAYS[1])
+        periodic = sorted(
+            (item for item in filings if item[0] in PERIODIC_FORMS and low <= item[1] <= high),
+            key=lambda item: item[1],
+        )[:SUCCESSION_MAX_HEADERS]
+
+        def fetch(periodic=periodic):
+            joint = {
+                item[2]: [cik for cik, _ in providers_v3.fetch_filing_filers(successor_cik, item[2], bytes_getter=sec_getter)]
+                for item in periodic
+            }
+            candidates = sorted({cik for ciks in joint.values() for cik in ciks if cik != successor_cik})
+            histories = {
+                cik: [(record.form, record.filing_date) for record in providers_v3.fetch_filings(cik, getter=sec_getter)]
+                for cik in candidates
+            }
+            return joint, histories
+
+        def persist(cursor, payload, started, completed, form=form, filed=filed, accession=accession):
+            joint, histories = payload
+            chosen = choose_predecessors(successor_cik, filed, joint, histories)
+            links = [
+                RegistrantLink(successor_cik, cik, form, accession, filed, "LINKED") for cik in chosen
+            ] or [RegistrantLink(successor_cik, None, form, accession, filed, "PREDECESSOR_NOT_FOUND")]
+            run_id = evidence_v3.record_run(
+                cursor, company_id=company_id, provider="SEC", operation="sec.succession",
+                contract_version=SEC_SUCCESSION_CONTRACT, started_at=started, completed_at=completed,
+                status="SUCCESS", error_code=None, item_count=len(links),
+                metadata={"succession_accession": accession},
+            )
+            for link in links:
+                evidence_v3.insert_registrant_link(
+                    cursor, company_id=company_id, link=link,
+                    evidence={"joint_filers": joint, "candidates": sorted(histories)},
+                    observed_at=completed, run_id=run_id,
+                )
+            predecessors.extend(chosen)
+            return {"succession_accession": accession, "linked": chosen}
+
+        steps.append(_run_operation(
+            company_id, "SEC", "sec.succession", SEC_SUCCESSION_CONTRACT, fetch, persist,
+            clock=clock, connection_factory=connection_factory,
+        ))
+    return steps, sorted(set(predecessors))
+
+
+def _ingest_lagging_instances(company_id, cik, clock, connection_factory, sec_getter, predecessors=()):
+    """Read the XBRL instance of recent periodic filings missing from Company Facts."""
+
+    from datetime import timedelta
+
+    since = clock().date() - timedelta(days=INSTANCE_LOOKBACK_DAYS)
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        pending = evidence_v3.load_periodic_filings_without_facts(cursor, company_id, since)
+    steps = []
+    for accession, form, filed in pending:
+        def fetch(accession=accession):
+            return providers_v3.fetch_filing_instance(cik, accession, getter=sec_getter, bytes_getter=sec_getter)
+
+        def persist(cursor, content, started, completed, accession=accession, form=form, filed=filed):
+            facts = []
+            for registrant in (cik, *predecessors):
+                # A joint filing tags its contexts with one of its registrants.
+                facts = parse_xbrl_instance(content, cik=registrant, accession=accession, form=form, filed_date=filed)
+                if facts:
+                    break
+            run_id = evidence_v3.record_run(
+                cursor, company_id=company_id, provider="SEC", operation="sec.xbrl_instance",
+                contract_version=SEC_INSTANCE_CONTRACT, started_at=started, completed_at=completed,
+                status="SUCCESS", error_code=None, item_count=len(facts), metadata={"accession": accession},
+            )
+            inserted, existing = evidence_v3.insert_sec_facts(
+                cursor, company_id=company_id, cik=cik, facts=facts, observed_at=completed, run_id=run_id,
+            )
+            return {"accession": accession, "items": len(facts), "inserted": inserted, "existing": existing}
+
+        steps.append(_run_operation(
+            company_id, "SEC", "sec.xbrl_instance", SEC_INSTANCE_CONTRACT, fetch, persist,
+            clock=clock, connection_factory=connection_factory,
+        ))
+    return steps
 
 
 def _persist_yahoo_facts(company_id, operation, facts, cursor, started, completed):

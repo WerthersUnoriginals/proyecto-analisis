@@ -26,7 +26,13 @@ from database.quarterly_v3 import (
     QuarterlyView,
     QuarterValue,
 )
-from database.split_basis import SPLIT_BASIS_VERSION, SplitReconciliation
+from database.registrant_v3 import registrant_history
+from database.split_basis import (
+    SPLIT_BASIS_VERSION,
+    SplitReconciliation,
+    effective_split_status,
+    split_events_provenance,
+)
 
 CONTRACT_VERSION = "c-input-contract-v3-11"
 INTEGRITY_VERSION = "c-integrity-v3"
@@ -40,7 +46,6 @@ _SHARES_QUALITY = {
     "WeightedAverageNumberOfDilutedSharesOutstanding": "DILUTED_EXACT",
     "WeightedAverageNumberOfShareOutstandingBasicAndDiluted": "BASIC_AND_DILUTED",
 }
-_HARD_SPLIT_DIAGNOSTICS = {"SPLIT_BASIS_UNCERTAIN"}
 
 
 def _number(value: Decimal | None) -> float | None:
@@ -177,11 +182,12 @@ def _consistency(view: QuarterlyView, metric: str, latest: QuarterKey | None) ->
 
 
 def _split_status(view: QuarterlyView, splits: SplitReconciliation) -> tuple[str, list[str]]:
-    reasons = list(splits.reasons) + list(view.split_status_reasons)
-    reasons += [item for item in view.diagnostics if item in _HARD_SPLIT_DIAGNOSTICS]
-    if view.split_status_reasons or any(item in _HARD_SPLIT_DIAGNOSTICS for item in view.diagnostics):
-        return "REVIEW_REQUIRED", reasons
-    return splits.status, reasons
+    return effective_split_status(
+        splits,
+        view_split_reasons=view.split_status_reasons,
+        view_diagnostics=view.diagnostics,
+        rejected=view.rejected_split_events,
+    )
 
 
 def build_c_contract_v3(
@@ -190,6 +196,8 @@ def build_c_contract_v3(
     *,
     company_id: int,
     as_of: datetime,
+    filer_status: str = "DOMESTIC",
+    registrant_links: tuple = (),
 ) -> dict:
     """Return the eleven C inputs, their provenance, and integrity details."""
 
@@ -255,6 +263,13 @@ def build_c_contract_v3(
 
     diagnostics = list(aggregate.diagnostics) + list(view.diagnostics) + split_reasons
     data_integrity = aggregate.data_integrity
+    if filer_status != "DOMESTIC":
+        diagnostics.append(filer_status)
+        data_integrity = "REVIEW_REQUIRED"
+    history, history_diagnostics, history_review = registrant_history(registrant_links, as_of)
+    diagnostics.extend(history_diagnostics)
+    if history_review:
+        data_integrity = "REVIEW_REQUIRED"
     if latest_eps_value is None or (as_of.date() - latest_eps_value.period_end).days > STALE_QUARTER_DAYS:
         diagnostics.append("STALE_LATEST_QUARTER" if latest_eps_value else "NO_EPS_EVIDENCE")
         data_integrity = "REVIEW_REQUIRED"
@@ -263,10 +278,7 @@ def build_c_contract_v3(
     provenance["data_integrity"] = {"reasons": list(dict.fromkeys(diagnostics))}
     provenance["split_integrity_status"] = {
         "reasons": list(dict.fromkeys(split_reasons)),
-        "events": [
-            {"date": event.event_date.isoformat(), "ratio": str(event.ratio), "sources": list(event.sources)}
-            for event in splits.events
-        ],
+        "events": split_events_provenance(splits, view.rejected_split_events),
     }
 
     as_of_text = as_of.isoformat()
@@ -295,6 +307,8 @@ def build_c_contract_v3(
             "split_integrity_status": split_status,
             "consistency": consistency,
             "shares_quality": shares_quality,
+            "filer_status": filer_status,
+            "registrant_history": history,
             "warnings": list(aggregate.warnings),
             "diagnostics": list(dict.fromkeys(diagnostics)),
         },

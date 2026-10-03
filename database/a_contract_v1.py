@@ -7,7 +7,13 @@ from decimal import Decimal
 
 from database.annual_v3 import ANNUAL_NORMALIZER_VERSION, AnnualGrowth, AnnualView, Cagr
 from database.sec_facts import CATALOG_VERSION
-from database.split_basis import SPLIT_BASIS_VERSION, SplitReconciliation
+from database.registrant_v3 import registrant_history
+from database.split_basis import (
+    SPLIT_BASIS_VERSION,
+    SplitReconciliation,
+    effective_split_status,
+    split_events_provenance,
+)
 
 CONTRACT_VERSION = "a-input-contract-v1"
 STALE_FISCAL_YEAR_DAYS = 455
@@ -68,6 +74,8 @@ def build_a_contract_v1(
     *,
     company_id: int,
     as_of: datetime,
+    filer_status: str = "DOMESTIC",
+    registrant_links: tuple = (),
 ) -> dict:
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
@@ -96,10 +104,12 @@ def build_a_contract_v1(
     if roe is not None and roe.value_pct is not None and roe.value_pct > ROE_FLAG_THRESHOLD_PCT:
         diagnostics.append("ROE_ABOVE_100_PCT")
 
-    split_status = splits.status
-    split_reasons = list(splits.reasons) + list(view.split_status_reasons)
-    if view.split_status_reasons or "SPLIT_BASIS_UNCERTAIN" in view.diagnostics:
-        split_status = "REVIEW_REQUIRED"
+    split_status, split_reasons = effective_split_status(
+        splits,
+        view_split_reasons=view.split_status_reasons,
+        view_diagnostics=view.diagnostics,
+        rejected=view.rejected_split_events,
+    )
 
     core_complete = (
         latest is not None
@@ -108,7 +118,14 @@ def build_a_contract_v1(
         and all(growth.status != "NO_DATA" for growth in growths)
         and roe is not None and roe.status == "OK"
     )
-    if split_status in {"REVIEW_REQUIRED", "UNKNOWN", "UNADJUSTED_DETECTED"}:
+    history, history_diagnostics, history_review = registrant_history(registrant_links, as_of)
+    diagnostics.extend(history_diagnostics)
+    if filer_status != "DOMESTIC":
+        integrity = "REVIEW_REQUIRED"
+        diagnostics.append(filer_status)
+    elif history_review:
+        integrity = "REVIEW_REQUIRED"
+    elif split_status in {"REVIEW_REQUIRED", "UNKNOWN", "UNADJUSTED_DETECTED"}:
         integrity = "REVIEW_REQUIRED"
         diagnostics.append(f"SPLIT_STATUS:{split_status}")
     elif latest is None:
@@ -170,10 +187,7 @@ def build_a_contract_v1(
         "annual_data_integrity": {"reasons": list(dict.fromkeys(diagnostics))},
         "split_integrity_status": {
             "reasons": list(dict.fromkeys(split_reasons)),
-            "events": [
-                {"date": event.event_date.isoformat(), "ratio": str(event.ratio), "sources": list(event.sources)}
-                for event in splits.events
-            ],
+            "events": split_events_provenance(splits, view.rejected_split_events),
         },
     }
     as_of_text = as_of.isoformat()
@@ -193,6 +207,8 @@ def build_a_contract_v1(
         "integrity": {
             "annual_data_integrity": integrity,
             "split_integrity_status": split_status,
+            "filer_status": filer_status,
+            "registrant_history": history,
             "diagnostics": list(dict.fromkeys(diagnostics)),
         },
     }

@@ -1,0 +1,123 @@
+"""Batch ingestion and C/A evaluation of many companies.
+
+Usage::
+
+    python -m database.batch_v3 AAPL MSFT NVDA [--ingest] [--file tickers.txt] [--out report.json]
+
+One company failing never stops the batch; its error is reported in its row.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import traceback
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Iterable
+
+
+def _default_evaluate(ticker: str, as_of: datetime):
+    from database import evidence_v3
+    from database.a_v3_runner import evaluate_a
+    from database.c_v3_runner import evaluate_c_v3
+
+    company = evidence_v3.load_company(ticker)
+    if company is None:
+        raise LookupError(f"ticker not ingested: {ticker}")
+    return evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of)
+
+
+def _default_ingest(ticker: str):
+    from database.ingest_v3 import ingest_company
+
+    return ingest_company(ticker)
+
+
+def _row(ticker: str, c_result: dict, a_result: dict) -> dict:
+    c_contract, c_score = c_result["contract"], c_result["score"]
+    a_contract, a_score = a_result["contract"], a_result["score"]
+    return {
+        "ticker": ticker,
+        "error": None,
+        "c_score": c_score["c_score_v1"]["normalized_score"],
+        "c_class": c_score["c_score_v1"]["class"],
+        "c_usability": c_score["c_score_v1"]["usability"],
+        "c_data_integrity": c_contract["data_integrity"],
+        "c_latest_eps_yoy_pct": c_contract["latest_eps_yoy_pct"],
+        "c_diagnostics": c_contract["integrity"]["diagnostics"],
+        "a_score": a_score["a_score_v1"]["normalized_score"],
+        "a_class": a_score["a_score_v1"]["class"],
+        "a_usability": a_score["a_score_v1"]["usability"],
+        "a_classic": a_score["a_classic"]["result"],
+        "a_data_integrity": a_contract["annual_data_integrity"],
+        "a_diagnostics": a_contract["integrity"]["diagnostics"],
+    }
+
+
+def run_batch(
+    tickers: Iterable[str],
+    *,
+    as_of: datetime,
+    ingest: Callable | None = None,
+    evaluate: Callable = _default_evaluate,
+) -> list[dict]:
+    rows = []
+    for ticker in tickers:
+        ticker = ticker.strip().upper()
+        try:
+            if ingest is not None:
+                ingest(ticker)
+            c_result, a_result = evaluate(ticker, as_of)
+            rows.append(_row(ticker, c_result, a_result))
+        except Exception as error:  # one company never stops the batch
+            rows.append({"ticker": ticker, "error": type(error).__name__,
+                         "error_detail": traceback.format_exception_only(error)[-1].strip()[:300]})
+    return rows
+
+
+def summarize(rows: list[dict]) -> dict:
+    ok = [row for row in rows if not row.get("error")]
+    return {
+        "companies": len(rows),
+        "errors": len(rows) - len(ok),
+        "c_data_integrity": Counter(row["c_data_integrity"] for row in ok),
+        "c_usability": Counter(row["c_usability"] for row in ok),
+        "a_data_integrity": Counter(row["a_data_integrity"] for row in ok),
+        "a_classic": Counter(row["a_classic"] for row in ok),
+        "diagnostics": Counter(
+            item.split(":")[0] for row in ok for item in row["c_diagnostics"] + row["a_diagnostics"]
+        ),
+    }
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Batch C/A evaluation")
+    parser.add_argument("tickers", nargs="*")
+    parser.add_argument("--file", help="text file with one ticker per line")
+    parser.add_argument("--ingest", action="store_true", help="ingest each ticker before evaluating")
+    parser.add_argument("--as-of", default=None)
+    parser.add_argument("--out", help="write rows and summary as JSON")
+    args = parser.parse_args(argv)
+    tickers = list(args.tickers)
+    if args.file:
+        tickers += [line.strip() for line in Path(args.file).read_text(encoding="utf-8").splitlines() if line.strip()]
+    as_of = datetime.fromisoformat(args.as_of) if args.as_of else datetime.now(timezone.utc)
+    rows = run_batch(tickers, as_of=as_of, ingest=_default_ingest if args.ingest else None)
+    summary = summarize(rows)
+    for row in rows:
+        if row.get("error"):
+            print(f"{row['ticker']:7} ERROR {row['error_detail']}")
+        else:
+            print(f"{row['ticker']:7} C {row['c_score']!s:>6} {row['c_usability']:15} {row['c_data_integrity']:40} "
+                  f"A {row['a_score']!s:>6} {row['a_classic']:22} {row['a_data_integrity']}")
+    print(json.dumps(summary, indent=2, default=dict))
+    if args.out:
+        Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},
+                                             indent=2, default=dict), encoding="utf-8")
+    return rows, summary
+
+
+if __name__ == "__main__":
+    main()

@@ -21,6 +21,7 @@ from database.quarterly_v3 import (
     _resolve_sec_tag_interval,
     build_fiscal_calendar,
     six_years_before,
+    verify_provider_events,
 )
 from database.sec_facts import METRIC_UNITS, SEC_TAG_CATALOG, SecFact, duration_class
 from database.split_basis import SplitEvent
@@ -110,6 +111,7 @@ class AnnualView:
     year_ends: Mapping[int, date]
     diagnostics: tuple[str, ...]
     split_status_reasons: tuple[str, ...]
+    rejected_split_events: tuple[SplitEvent, ...] = ()
 
     def effective(self, metric: str) -> dict[int, AnnualValue]:
         return {year: values[0] for year, values in self.candidates.get(metric, {}).items() if values}
@@ -166,6 +168,9 @@ class AnnualView:
     def roe(self, year: int) -> Roe:
         closing_date = self.year_ends.get(year)
         opening_date = self.year_ends.get(year - 1)
+        incomplete = None
+        # Each pair is internally consistent (parent-only or including minority
+        # interest); pairs are tried in order and never mixed.
         for income_tag, equity_tag in ROE_PAIRS:
             income = self._value("NET_INCOME", year, income_tag)
             equity = self.equity.get(equity_tag, {})
@@ -174,15 +179,16 @@ class AnnualView:
             closing = equity.get(closing_date)
             opening = equity.get(opening_date) if opening_date else None
             if closing is None or opening is None:
-                return Roe(year, "NO_DATA", None, (income_tag, equity_tag), income, opening, closing,
-                           ("EQUITY_NOT_AVAILABLE",))
+                incomplete = incomplete or Roe(year, "NO_DATA", None, (income_tag, equity_tag), income,
+                                               opening, closing, ("EQUITY_NOT_AVAILABLE",))
+                continue
             if opening.value <= 0 or closing.value <= 0:
                 return Roe(year, "NOT_MEANINGFUL", None, (income_tag, equity_tag), income, opening, closing,
                            ("NON_POSITIVE_EQUITY",))
             average = (opening.value + closing.value) / 2
             return Roe(year, "OK", income.value / average * 100, (income_tag, equity_tag),
                        income, opening, closing)
-        return Roe(year, "NO_DATA", None, None, None, None, None, ("NET_INCOME_NOT_AVAILABLE",))
+        return incomplete or Roe(year, "NO_DATA", None, None, None, None, None, ("NET_INCOME_NOT_AVAILABLE",))
 
 
 def _latest_unique_instant(facts: Sequence[SecFact]) -> SecFact | None:
@@ -211,6 +217,7 @@ def build_annual_view(
     year_by_end = {end: label for label, end in year_ends.items()}
     value_floor = as_of_date - timedelta(days=VALUE_WINDOW_DAYS)
     acc = _Accumulator()
+    events, rejected = verify_provider_events(facts, events, acc)
 
     grouped: dict[tuple[str, str, tuple[date, date]], list[SecFact]] = defaultdict(list)
     for fact in facts:
@@ -282,4 +289,5 @@ def build_annual_view(
         year_ends=year_ends,
         diagnostics=tuple(dict.fromkeys(acc.diagnostics)),
         split_status_reasons=tuple(dict.fromkeys(acc.split_reasons)),
+        rejected_split_events=rejected,
     )

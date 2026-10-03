@@ -17,6 +17,7 @@ from database import evidence_v3
 from database.a_contract_v1 import A_INPUT_KEYS, build_a_contract_v1
 from database.annual_v3 import build_annual_view
 from database.c_v3_runner import load_split_reconciliation
+from database.registrant_v3 import classify_filer
 
 
 def evaluate_a(company_id: int, as_of: datetime, *, connection_factory: Callable | None = None,
@@ -26,7 +27,13 @@ def evaluate_a(company_id: int, as_of: datetime, *, connection_factory: Callable
     sec_facts = evidence_v3.load_sec_facts(company_id, as_of, connection_factory=connection_factory)
     splits = load_split_reconciliation(company_id, as_of, sec_facts, capture_loader=capture_loader)
     view = build_annual_view(sec_facts, split_events=splits.events, as_of=as_of)
-    contract = build_a_contract_v1(view, splits, company_id=company_id, as_of=as_of)
+    filer_status = classify_filer(
+        evidence_v3.load_filing_forms(company_id, as_of, connection_factory=connection_factory), as_of,
+    )
+    links = tuple(evidence_v3.load_registrant_links(company_id, as_of, connection_factory=connection_factory))
+    contract = build_a_contract_v1(
+        view, splits, company_id=company_id, as_of=as_of, filer_status=filer_status, registrant_links=links,
+    )
     return {"contract": contract, "score": build_a_score(contract)}
 
 

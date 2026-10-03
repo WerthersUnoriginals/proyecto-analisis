@@ -125,12 +125,15 @@ class RealFixtureTests(unittest.TestCase):
         self.assertTrue({"QUARTER", "YTD_9M", "ANNUAL"} <= classes)
 
     def test_catalog_is_versioned_and_ordered(self):
-        self.assertEqual(CATALOG_VERSION, "sec-tag-catalog-v4")
+        self.assertEqual(CATALOG_VERSION, "sec-tag-catalog-v5")
         self.assertEqual(SEC_TAG_CATALOG["STOCKHOLDERS_EQUITY"][0], "StockholdersEquity")
         self.assertEqual(SEC_TAG_CATALOG["EPS_DILUTED"][0], "EarningsPerShareDiluted")
         self.assertEqual(
-            SEC_TAG_CATALOG["REVENUE"][:2],
-            ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
+            SEC_TAG_CATALOG["REVENUE"][:4],
+            # Totals first; ASC 606 contract revenue is a subset when both are reported
+            # (BRK: Revenues 101.8B vs contract revenue 70.1B).
+            ("Revenues", "RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperatingRevenue",
+             "RevenueFromContractWithCustomerExcludingAssessedTax"),
         )
 
 

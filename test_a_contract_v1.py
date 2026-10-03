@@ -76,6 +76,22 @@ class IntegrityTests(unittest.TestCase):
         self.assertIsNone(result["eps_cagr_3y_pct"])
         self.assertEqual(result["annual_data_integrity"], "VERIFIED_WITH_PARTIAL_CORE_DATA")
 
+    def test_foreign_filer_is_explicit(self):
+        view = build_annual_view([], split_events=(), as_of=AS_OF)
+        result = build_a_contract_v1(view, NO_SPLITS, company_id=1, as_of=AS_OF,
+                                     filer_status="FOREIGN_FILER_NOT_SUPPORTED")
+        self.assertEqual(result["annual_data_integrity"], "REVIEW_REQUIRED")
+        self.assertIn("FOREIGN_FILER_NOT_SUPPORTED", result["integrity"]["diagnostics"])
+
+    def test_unresolved_succession_requires_review(self):
+        from database.registrant_v3 import RegistrantLink
+
+        link = RegistrantLink("0002115436", None, "8-K12B", "acc", date(2026, 7, 1), "PREDECESSOR_NOT_FOUND")
+        view = build_annual_view(healthy(), split_events=(), as_of=AS_OF)
+        result = build_a_contract_v1(view, NO_SPLITS, company_id=1, as_of=AS_OF, registrant_links=(link,))
+        self.assertEqual(result["annual_data_integrity"], "REVIEW_REQUIRED")
+        self.assertIn("REGISTRANT_SUCCESSION_UNRESOLVED", result["integrity"]["diagnostics"])
+
     def test_split_problems_require_review(self):
         result = contract(healthy(), splits=SplitReconciliation("UNKNOWN", ()))
         self.assertEqual(result["split_integrity_status"], "UNKNOWN")

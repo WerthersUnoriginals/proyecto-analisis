@@ -109,6 +109,20 @@ class ReconcileTests(unittest.TestCase):
         )
         self.assertEqual(len(result.events), 1)
 
+    def test_sec_split_before_first_periodic_filing_is_not_a_review(self):
+        # CRWV split before its IPO: every 10-Q/10-K was filed after it, so all
+        # published values already share the post-split basis.
+        periodic = SecFact(
+            taxonomy="us-gaap", tag="NetIncomeLoss", unit="USD", period_start=date(2025, 1, 1),
+            period_end=date(2025, 3, 31), value=Decimal(1), accession="q1", fiscal_year=2025,
+            fiscal_period="Q1", form="10-Q", filed_date=date(2025, 5, 15), frame=None,
+        )
+        result = reconcile_split_events(
+            [], [ratio_fact(date(2025, 2, 20), "2"), periodic], window_start=WINDOW, as_of=AS_OF,
+        )
+        self.assertEqual(result.status, "NO_RECENT_SPLITS")
+        self.assertIn("SEC_SPLIT_BEFORE_FIRST_PERIODIC_FILING", result.reasons)
+
     def test_events_after_as_of_are_ignored(self):
         result = reconcile_split_events(
             [(date(2027, 1, 1), Decimal("2"))], [], window_start=WINDOW, as_of=AS_OF,
@@ -141,6 +155,10 @@ class SuspectedRatioTests(unittest.TestCase):
         self.assertEqual(suspected_split_ratio(Decimal("2.48"), Decimal("0.25")), Decimal("10"))
         self.assertEqual(suspected_split_ratio(Decimal("0.25"), Decimal("2.48")), Decimal("0.1"))
         self.assertEqual(suspected_split_ratio(Decimal("3.03"), Decimal("0.76")), Decimal("4"))
+
+    def test_large_ratios(self):
+        self.assertEqual(suspected_split_ratio(Decimal("65.0"), Decimal("1.30")), Decimal("50"))  # CMG 2024
+        self.assertEqual(suspected_split_ratio(Decimal("7.0"), Decimal("1.0")), Decimal("7"))   # AAPL 2014
 
     def test_ordinary_restatement_is_not_a_split(self):
         self.assertIsNone(suspected_split_ratio(Decimal("1.05"), Decimal("1.00")))

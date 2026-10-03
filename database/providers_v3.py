@@ -188,6 +188,59 @@ def fetch_filings(cik: str, *, getter: Callable | None = None) -> list[FilingRec
     return sorted(unique.values(), key=lambda record: (record.filing_date, record.accession))
 
 
+SEC_ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{folder}"
+
+
+def _sec_get_bytes(url: str, getter: Callable | None = None) -> bytes:
+    global _last_sec_request
+    if getter is not None:
+        return getter(url)
+    import requests
+
+    wait = SEC_MIN_INTERVAL_SECONDS - (time.monotonic() - _last_sec_request)
+    if wait > 0:
+        time.sleep(wait)
+    try:
+        response = requests.get(url, headers=sec_headers(), timeout=60)
+        _last_sec_request = time.monotonic()
+        response.raise_for_status()
+        return response.content
+    except requests.HTTPError as exc:
+        status = getattr(exc.response, "status_code", None)
+        codes = {403: "SEC_ACCESS_DENIED", 404: "SEC_NOT_FOUND", 429: "SEC_RATE_LIMITED"}
+        raise ProviderError(codes.get(status, "SEC_HTTP_ERROR")) from None
+    except requests.RequestException:
+        raise ProviderError("SEC_TRANSPORT_ERROR") from None
+
+
+def fetch_filing_instance(cik: str, accession: str, *, getter: Callable | None = None,
+                          bytes_getter: Callable | None = None) -> bytes:
+    """Download the XBRL instance of one filing from EDGAR archives."""
+
+    from database.sec_xbrl_instance import choose_instance_file
+
+    base = SEC_ARCHIVES_URL.format(cik=int(cik), folder=accession.replace("-", ""))
+    listing = _sec_get_json(f"{base}/index.json", getter)
+    names = [item["name"] for item in listing.get("directory", {}).get("item", [])]
+    instance = choose_instance_file(names)
+    if instance is None:
+        raise ProviderError("SEC_INSTANCE_NOT_FOUND")
+    return _sec_get_bytes(f"{base}/{instance}", bytes_getter)
+
+
+def fetch_filing_filers(cik: str, accession: str, *, bytes_getter: Callable | None = None) -> list[tuple[str, str]]:
+    """Every registrant listed in the EDGAR header of one filing: (cik, name)."""
+
+    from database.registrant_v3 import parse_filers_header
+
+    base = SEC_ARCHIVES_URL.format(cik=int(cik), folder=accession.replace("-", ""))
+    text = _sec_get_bytes(f"{base}/{accession}-index-headers.html", bytes_getter).decode("utf-8", "replace")
+    filers = parse_filers_header(text)
+    if not filers:
+        raise ProviderError("SEC_HEADER_WITHOUT_FILERS")
+    return filers
+
+
 def fetch_yahoo_timeseries(ticker: str, *, fetcher: Callable | None = None) -> dict:
     """Return {series_type: pandas.Series}; fail if any requested type fails."""
 

@@ -1,0 +1,54 @@
+"""Offline tests for batch evaluation of many companies."""
+
+import unittest
+from collections import Counter
+from datetime import datetime, timezone
+
+from database.batch_v3 import run_batch, summarize
+
+UTC = timezone.utc
+AS_OF = datetime(2026, 10, 2, tzinfo=UTC)
+
+
+def fake_result(score, integrity="VERIFIED", classic="PASS"):
+    contract = {"latest_eps": 1.0, "latest_eps_yoy_pct": 30.0, "data_integrity": integrity,
+                "split_integrity_status": "NO_RECENT_SPLITS",
+                "integrity": {"diagnostics": []}}
+    score_block = {"c_score_v1": {"normalized_score": score, "class": "STRONG", "status": "OK",
+                                  "usability": "C_SCORE_USABLE"}, "c_flags": []}
+    a_contract = {"latest_fiscal_year": 2025, "annual_data_integrity": integrity, "integrity": {"diagnostics": []}}
+    a_score = {"a_score_v1": {"normalized_score": score, "class": "STRONG", "status": "OK",
+                              "usability": "A_SCORE_USABLE"}, "a_classic": {"result": classic}, "a_flags": []}
+    return {"contract": contract, "score": score_block}, {"contract": a_contract, "score": a_score}
+
+
+class BatchTests(unittest.TestCase):
+    def test_failures_do_not_stop_the_batch(self):
+        def evaluate(ticker, as_of):
+            if ticker == "BAD":
+                raise RuntimeError("boom")
+            return fake_result(80.0)
+
+        rows = run_batch(["AAA", "BAD", "CCC"], as_of=AS_OF, evaluate=evaluate)
+        self.assertEqual([row["ticker"] for row in rows], ["AAA", "BAD", "CCC"])
+        self.assertEqual(rows[1]["error"], "RuntimeError")
+        self.assertEqual(rows[2]["c_score"], 80.0)
+
+    def test_ingest_runs_first_when_requested(self):
+        calls = []
+        rows = run_batch(["AAA"], as_of=AS_OF, ingest=lambda ticker: calls.append(("ingest", ticker)),
+                         evaluate=lambda ticker, as_of: calls.append(("evaluate", ticker)) or fake_result(1.0))
+        self.assertEqual(calls, [("ingest", "AAA"), ("evaluate", "AAA")])
+        self.assertIsNone(rows[0]["error"])
+
+    def test_summary_counts_statuses(self):
+        rows = run_batch(["A", "B"], as_of=AS_OF,
+                         evaluate=lambda ticker, as_of: fake_result(70.0, "REVIEW_REQUIRED" if ticker == "B" else "VERIFIED"))
+        summary = summarize(rows)
+        self.assertEqual(summary["companies"], 2)
+        self.assertEqual(summary["c_data_integrity"], Counter({"VERIFIED": 1, "REVIEW_REQUIRED": 1}))
+        self.assertEqual(summary["errors"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

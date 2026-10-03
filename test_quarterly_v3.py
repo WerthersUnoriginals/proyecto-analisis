@@ -143,6 +143,23 @@ class Q4DerivationTests(unittest.TestCase):
         self.assertEqual((q4.period_start, q4.period_end), (date(2024, 9, 30), date(2024, 12, 31)))
         self.assertEqual(len(q4.lineage), 2)
 
+    def test_concept_outranks_reported_versus_derived(self):
+        # PLD Q4 2025: a reported ProfitLoss (includes minority interest) must not
+        # displace NetIncomeLoss derived exactly from official FY and 9M figures.
+        facts = [
+            fact("NetIncomeLoss", date(2024, 1, 1), date(2024, 9, 29), "60",
+                 accession="q3", filed=date(2024, 11, 1), fy=2024, fp="Q3"),
+            fact("NetIncomeLoss", date(2024, 7, 1), date(2024, 9, 29), "20",
+                 accession="q3", filed=date(2024, 11, 1), fy=2024, fp="Q3"),
+            fact("NetIncomeLoss", date(2024, 1, 1), date(2024, 12, 31), "100",
+                 accession="k", filed=date(2025, 2, 1), fy=2024, fp="FY", form="10-K"),
+            fact("ProfitLoss", date(2024, 9, 30), date(2024, 12, 31), "43",
+                 accession="k", filed=date(2025, 2, 1), fy=2024, fp="FY", form="10-K"),
+        ]
+        view = build_quarterly_view(facts, [], split_events=(), as_of=datetime(2025, 3, 1, tzinfo=UTC))
+        q4 = view.effective("NET_INCOME")[QuarterKey(2024, 4)]
+        self.assertEqual((q4.concept, q4.kind, q4.value), ("NetIncomeLoss", "DERIVED", Decimal("40")))
+
     def test_reported_q4_wins_and_mismatch_is_recorded(self):
         view = build_quarterly_view(self.facts(True, "41"), [], split_events=(), as_of=datetime(2025, 3, 1, tzinfo=UTC))
         q4 = view.effective("REVENUE")[QuarterKey(2024, 4)]
@@ -202,17 +219,37 @@ class GrowthTests(unittest.TestCase):
 
     def test_yoy_uses_one_tag_and_falls_back_to_a_tag_present_in_both(self):
         facts = [
-            fact("RevenueFromContractWithCustomerExcludingAssessedTax", date(2025, 1, 1), date(2025, 3, 31), "120",
-                 accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
             fact("Revenues", date(2025, 1, 1), date(2025, 3, 31), "125",
                  accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
-            fact("Revenues", date(2024, 1, 1), date(2024, 3, 31), "100",
+            fact("RevenueFromContractWithCustomerExcludingAssessedTax", date(2025, 1, 1), date(2025, 3, 31), "120",
+                 accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
+            fact("RevenueFromContractWithCustomerExcludingAssessedTax", date(2024, 1, 1), date(2024, 3, 31), "100",
                  accession="a", filed=date(2024, 5, 1), fy=2024, fp="Q1"),
         ]
         view = build_quarterly_view(facts, [], split_events=(), as_of=datetime(2025, 6, 1, tzinfo=UTC))
         growth = view.growth("REVENUE", QuarterKey(2025, 1))
-        self.assertEqual(growth.concept, "Revenues")
-        self.assertEqual(growth.yoy_pct, Decimal("25"))
+        self.assertEqual(growth.concept, "RevenueFromContractWithCustomerExcludingAssessedTax")
+        self.assertEqual(growth.yoy_pct, Decimal("20"))
+
+    def test_total_revenue_wins_over_contract_revenue_subset(self):
+        facts = [
+            fact("Revenues", date(2025, 1, 1), date(2025, 3, 31), "101",
+                 accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
+            fact("RevenueFromContractWithCustomerExcludingAssessedTax", date(2025, 1, 1), date(2025, 3, 31), "70",
+                 accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
+        ]
+        view = build_quarterly_view(facts, [], split_events=(), as_of=datetime(2025, 6, 1, tzinfo=UTC))
+        self.assertEqual(view.effective("REVENUE")[QuarterKey(2025, 1)].concept, "Revenues")
+
+    def test_bank_net_revenue_is_a_revenue_concept(self):
+        facts = [
+            fact("RevenuesNetOfInterestExpense", date(2024, 1, 1), date(2024, 3, 31), "50",
+                 accession="a", filed=date(2024, 5, 1), fy=2024, fp="Q1"),
+            fact("RevenuesNetOfInterestExpense", date(2025, 1, 1), date(2025, 3, 31), "60",
+                 accession="b", filed=date(2025, 5, 1), fy=2025, fp="Q1"),
+        ]
+        view = build_quarterly_view(facts, [], split_events=(), as_of=datetime(2025, 6, 1, tzinfo=UTC))
+        self.assertEqual(view.growth("REVENUE", QuarterKey(2025, 1)).yoy_pct, Decimal("20"))
 
     def test_non_positive_prior_gives_none_and_loss_to_profit(self):
         facts = calendar_year_company({(2024, 1): "-0.50", (2025, 1): "0.40"})
@@ -254,6 +291,35 @@ class SplitBasisTests(unittest.TestCase):
         ]
         view = build_quarterly_view(facts, [], split_events=(), as_of=datetime(2024, 10, 1, tzinfo=UTC))
         self.assertIn("UNDECLARED_SPLIT_SUSPECTED", view.split_status_reasons)
+
+    def shares_pair(self, before, after):
+        return [
+            fact("WeightedAverageNumberOfDilutedSharesOutstanding", date(2021, 7, 1), date(2021, 9, 30), before,
+                 accession="q21", filed=date(2021, 10, 30), fy=2021, fp="Q3"),
+            fact("WeightedAverageNumberOfDilutedSharesOutstanding", date(2022, 7, 1), date(2022, 9, 30), "1000000",
+                 accession="q22", filed=date(2022, 10, 30), fy=2022, fp="Q3"),
+            fact("WeightedAverageNumberOfDilutedSharesOutstanding", date(2021, 7, 1), date(2021, 9, 30), after,
+                 accession="q22", filed=date(2022, 10, 30), fy=2022, fp="Q3"),
+            fact("EarningsPerShareDiluted", date(2021, 7, 1), date(2021, 9, 30), "1.00",
+                 accession="q21", filed=date(2021, 10, 30), fy=2021, fp="Q3"),
+        ]
+
+    def test_provider_adjustment_contradicted_by_sec_shares_is_rejected(self):
+        # Realty Income: yfinance lists a 1.032 "split" (Orion spin-off price adjustment);
+        # SEC share counts do not change, so it is not a share split.
+        provider_only = (SplitEvent(date(2021, 11, 15), Decimal("1.032"), ("YAHOO",)),)
+        view = build_quarterly_view(self.shares_pair("1000000", "1000000"), [], split_events=provider_only,
+                                    as_of=datetime(2023, 1, 1, tzinfo=UTC))
+        self.assertEqual(view.rejected_split_events, provider_only)
+        self.assertEqual(view.effective("EPS_DILUTED")[QuarterKey(2021, 3)].value, Decimal("1.00"))
+        self.assertEqual(view.split_status_reasons, ())
+
+    def test_provider_split_confirmed_by_sec_shares_is_applied(self):
+        provider_only = (SplitEvent(date(2022, 6, 1), Decimal("2"), ("YAHOO",)),)
+        view = build_quarterly_view(self.shares_pair("1000000", "2000000"), [], split_events=provider_only,
+                                    as_of=datetime(2023, 1, 1, tzinfo=UTC))
+        self.assertEqual(view.rejected_split_events, ())
+        self.assertEqual(view.effective("EPS_DILUTED")[QuarterKey(2021, 3)].value, Decimal("0.50"))
 
     def test_filing_close_to_split_without_reference_is_excluded(self):
         facts = [fact("EarningsPerShareDiluted", date(2024, 2, 1), date(2024, 4, 28), "6.00",

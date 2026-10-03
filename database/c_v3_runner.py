@@ -17,6 +17,7 @@ from c_score_v13 import build_c_score
 from database import evidence_v3
 from database.c_contract_v3 import build_c_contract_v3
 from database.quarterly_v3 import build_quarterly_view, six_years_before, yahoo_rows_from_snapshot
+from database.registrant_v3 import classify_filer
 from database.split_basis import reconcile_split_events
 
 
@@ -42,7 +43,13 @@ def evaluate_c_v3(company_id: int, as_of: datetime, *, connection_factory: Calla
     )
     splits = load_split_reconciliation(company_id, as_of, sec_facts, capture_loader=capture_loader)
     view = build_quarterly_view(sec_facts, yahoo_rows, split_events=splits.events, as_of=as_of)
-    contract = build_c_contract_v3(view, splits, company_id=company_id, as_of=as_of)
+    filer_status = classify_filer(
+        evidence_v3.load_filing_forms(company_id, as_of, connection_factory=connection_factory), as_of,
+    )
+    links = tuple(evidence_v3.load_registrant_links(company_id, as_of, connection_factory=connection_factory))
+    contract = build_c_contract_v3(
+        view, splits, company_id=company_id, as_of=as_of, filer_status=filer_status, registrant_links=links,
+    )
     score = build_c_score(contract)
     return {"contract": contract, "score": score, "score_v12": build_c_score_v12(contract), "evidence": {
         "sec_facts": len(sec_facts), "yahoo_rows": len(yahoo_rows),

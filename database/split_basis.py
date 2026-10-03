@@ -27,7 +27,7 @@ SAME_EVENT_DAYS = 120
 UNCERTAIN_BASIS_DAYS = 7
 SUSPECTED_RATIO_TOLERANCE = Decimal("0.02")
 COMMON_SPLIT_RATIOS = tuple(
-    Decimal(value) for value in ("1.5", "2", "3", "4", "5", "8", "10", "15", "20")
+    Decimal(value) for value in ("1.5", "2", "3", "4", "5", "6", "7", "8", "10", "15", "20", "25", "30", "50", "100")
 )
 
 
@@ -75,7 +75,13 @@ def reconcile_split_events(
     makes the status ``REVIEW_REQUIRED``.
     """
 
+    sec_facts = list(sec_facts)
     sec_ratio_facts = _sec_split_facts(sec_facts, window_start, as_of)
+    periodic_filed = [
+        fact.filed_date for fact in sec_facts
+        if fact.form in ("10-Q", "10-Q/A", "10-K", "10-K/A") and fact.metric != "SPLIT_RATIO"
+    ]
+    first_periodic_filing = min(periodic_filed) if periodic_filed else None
     reasons: list[str] = []
     events: list[SplitEvent] = []
     matched_sec: set[int] = set()
@@ -107,6 +113,11 @@ def reconcile_split_events(
         end = fact.period_end + timedelta(days=SAME_EVENT_DAYS)
         if any(event.ratio == fact.value and start <= event.event_date <= end for event in events):
             continue
+        if first_periodic_filing is not None and fact.period_end < first_periodic_filing:
+            # Every periodic report postdates the split (e.g. a pre-IPO split), so
+            # all published values already share the post-split basis.
+            reasons.append("SEC_SPLIT_BEFORE_FIRST_PERIODIC_FILING")
+            continue
         reasons.append("SEC_SPLIT_NOT_IN_PROVIDER")
         events.append(SplitEvent(fact.period_end, fact.value, ("SEC",)))
 
@@ -123,6 +134,42 @@ def reconcile_split_events(
         # caller downgrades the status if those pairs contradict the event.
         status = "VERIFIED_ALREADY_ADJUSTED"
     return SplitReconciliation(status, tuple(events), tuple(dict.fromkeys(reasons)))
+
+
+HARD_VIEW_DIAGNOSTICS = frozenset({"SPLIT_BASIS_UNCERTAIN"})
+
+
+def effective_split_status(
+    splits: SplitReconciliation,
+    *,
+    view_split_reasons: Sequence[str],
+    view_diagnostics: Sequence[str],
+    rejected: Sequence[SplitEvent],
+) -> tuple[str, list[str]]:
+    """Combine reconciliation with what the evidence view proved or rejected."""
+
+    reasons = list(splits.reasons) + list(view_split_reasons)
+    reasons += [item for item in view_diagnostics if item in HARD_VIEW_DIAGNOSTICS]
+    if rejected:
+        reasons.append("PROVIDER_SPLIT_REJECTED_BY_SEC")
+    if view_split_reasons or any(item in HARD_VIEW_DIAGNOSTICS for item in view_diagnostics):
+        return "REVIEW_REQUIRED", reasons
+    applied = [event for event in splits.events if event not in rejected]
+    if splits.status == "VERIFIED_ALREADY_ADJUSTED" and not applied:
+        return "NO_RECENT_SPLITS", reasons
+    return splits.status, reasons
+
+
+def split_events_provenance(splits: SplitReconciliation, rejected: Sequence[SplitEvent]) -> list[dict]:
+    return [
+        {
+            "date": event.event_date.isoformat(),
+            "ratio": str(event.ratio),
+            "sources": list(event.sources),
+            "status": "REJECTED_BY_SEC" if event in rejected else "APPLIED",
+        }
+        for event in splits.events
+    ]
 
 
 def basis_factor(events: Iterable[SplitEvent], basis_date: date, as_of: date) -> Decimal:

@@ -94,6 +94,36 @@ class SemanticsTests(unittest.TestCase):
         self.assertEqual(result["split_integrity_status"], "REVIEW_REQUIRED")
         self.assertEqual(result["data_integrity"], "REVIEW_REQUIRED")
 
+    def test_provider_event_rejected_by_sec_leaves_no_recent_splits(self):
+        from test_quarterly_v3 import SplitBasisTests
+
+        event = SplitEvent(date(2021, 11, 15), Decimal("1.032"), ("YAHOO",))
+        splits = SplitReconciliation("VERIFIED_ALREADY_ADJUSTED", (event,), ("PROVIDER_SPLIT_NOT_IN_SEC",))
+        facts = SplitBasisTests().shares_pair("1000000", "1000000")
+        result = contract(facts, as_of=datetime(2023, 1, 1, tzinfo=UTC), splits=splits)
+        self.assertEqual(result["split_integrity_status"], "NO_RECENT_SPLITS")
+        events = result["c_input_contract"]["inputs"]["split_integrity_status"]["events"]
+        self.assertEqual(events[0]["status"], "REJECTED_BY_SEC")
+
+    def test_foreign_filer_is_explicit(self):
+        view = build_quarterly_view([], [], split_events=(), as_of=datetime(2026, 10, 2, tzinfo=UTC))
+        result = build_c_contract_v3(view, NO_SPLITS, company_id=1, as_of=datetime(2026, 10, 2, tzinfo=UTC),
+                                     filer_status="FOREIGN_FILER_NOT_SUPPORTED")
+        self.assertEqual(result["data_integrity"], "REVIEW_REQUIRED")
+        self.assertIn("FOREIGN_FILER_NOT_SUPPORTED", result["integrity"]["diagnostics"])
+
+    def test_registrant_succession_is_reported(self):
+        from database.registrant_v3 import RegistrantLink
+
+        link = RegistrantLink("0002115436", "0000034088", "8-K12B", "acc", date(2026, 7, 1), "LINKED")
+        view = build_quarterly_view(eight_quarters(["1"] * 6, ["10"] * 6), [], split_events=(),
+                                    as_of=datetime(2025, 11, 15, tzinfo=UTC))
+        result = build_c_contract_v3(view, NO_SPLITS, company_id=1, as_of=datetime(2025, 11, 15, tzinfo=UTC),
+                                     registrant_links=(link,))
+        self.assertEqual(result["integrity"]["registrant_history"][0]["predecessor_cik"], "0000034088")
+        self.assertIn("REGISTRANT_SUCCESSION:2026-07-01:0000034088->0002115436", result["integrity"]["diagnostics"])
+        self.assertNotEqual(result["data_integrity"], "REVIEW_REQUIRED")
+
     def test_unknown_capture_is_unknown_and_review(self):
         result = contract(eight_quarters(["1"] * 6, ["10"] * 6), as_of=datetime(2025, 11, 15, tzinfo=UTC),
                           splits=SplitReconciliation("UNKNOWN", ()))
