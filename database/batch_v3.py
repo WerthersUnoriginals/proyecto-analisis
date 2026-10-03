@@ -1,4 +1,4 @@
-"""Batch ingestion and C/A/N/S/L/I/M evaluation of many companies.
+"""Batch ingestion and C/A/N/S/L/I/M evaluation (plus the technical entry phase) of many companies.
 
 Usage::
 
@@ -29,13 +29,14 @@ def _default_evaluate(ticker: str, as_of: datetime):
     from database.l_v3_runner import evaluate_l
     from database.m_v3_runner import evaluate_m
     from database.s_v3_runner import evaluate_s
+    from database.t_v3_runner import evaluate_t
 
     company = evidence_v3.load_company(ticker)
     if company is None:
         raise LookupError(f"ticker not ingested: {ticker}")
     return (evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of), evaluate_n(company[0], as_of),
             evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of), evaluate_i(company[0], as_of),
-            evaluate_m(as_of))
+            evaluate_m(as_of), evaluate_t(company[0], as_of))
 
 
 def _default_ingest(ticker: str):
@@ -139,11 +140,29 @@ def _canslim_fields(letters: dict, m_result: dict | None) -> dict:
     }
 
 
+def _t_fields(t_result: dict | None, canslim: dict) -> dict:
+    if t_result is None:
+        return {}
+    contract = t_result["contract"]
+    candidate = canslim.get("canslim_letters_passed") == 6 and canslim.get("canslim_data_status") != "REVIEW"
+    return {
+        "t_score": contract["score_final"],
+        "t_layer1_ok": contract["layer1_ok"],
+        "t_setup": contract["setup_type"],
+        "t_momentum": contract["momentum"],
+        "t_data_integrity": contract["t_data_integrity"],
+        # CAN SLIM says what, the technical layer says when (spec technical v2, H2).
+        "entry_setup": bool(candidate and contract["entry_phase_ready"]),
+    }
+
+
 def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None,
          s_result: dict | None = None, l_result: dict | None = None, i_result: dict | None = None,
-         m_result: dict | None = None) -> dict:
+         m_result: dict | None = None, t_result: dict | None = None) -> dict:
     c_contract, c_score = c_result["contract"], c_result["score"]
     a_contract, a_score = a_result["contract"], a_result["score"]
+    canslim = _canslim_fields({"C": c_result, "A": a_result, "N": n_result, "S": s_result, "L": l_result,
+                               "I": i_result}, m_result)
     return {
         "ticker": ticker,
         "error": None,
@@ -164,8 +183,8 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
         **_l_fields(l_result),
         **_i_fields(i_result),
         **_m_fields(m_result),
-        **_canslim_fields({"C": c_result, "A": a_result, "N": n_result, "S": s_result, "L": l_result,
-                           "I": i_result}, m_result),
+        **canslim,
+        **_t_fields(t_result, canslim),
     }
 
 
@@ -226,10 +245,11 @@ def summarize(rows: list[dict]) -> dict:
         "i_data_integrity": Counter(row.get("i_data_integrity") for row in ok if "i_data_integrity" in row),
         "i_classic": Counter(row.get("i_classic") for row in ok if "i_classic" in row),
         "canslim_verdict": Counter(row.get("canslim_verdict") for row in ok if "canslim_verdict" in row),
+        "entry_setups": [row["ticker"] for row in ok if row.get("entry_setup")],
         "ranking": [
             {"ticker": row["ticker"], "composite": row["canslim_composite"], "passed": row["canslim_letters_passed"],
              "failed": row["canslim_failed_letters"], "status": row["canslim_data_status"],
-             "verdict": row["canslim_verdict"]}
+             "verdict": row["canslim_verdict"], "t_score": row.get("t_score"), "t_setup": row.get("t_setup")}
             for row in sorted((row for row in ok if row.get("canslim_composite") is not None),
                               key=lambda row: row["canslim_composite"], reverse=True)
         ],
@@ -283,7 +303,8 @@ def main(argv=None):
     print(json.dumps({key: value for key, value in summary.items() if key != "ranking"}, indent=2, default=dict))
     for position, item in enumerate(summary["ranking"], start=1):
         print(f"{position:3} {item['ticker']:7} {item['composite']:6.2f} {item['passed']}/6 "
-              f"{item['verdict']:31} {item['status']:8} fails: {','.join(item['failed']) or '-'}")
+              f"{item['verdict']:31} {item['status']:8} T {item['t_score']!s:>4} {item['t_setup'] or '':19} "
+              f"fails: {','.join(item['failed']) or '-'}")
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},
                                              indent=2, default=dict), encoding="utf-8")

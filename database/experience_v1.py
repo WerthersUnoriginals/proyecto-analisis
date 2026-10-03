@@ -46,7 +46,7 @@ def _code_commit() -> str | None:
 
 
 def build_record(ticker: str, results: tuple) -> dict:
-    """One experience record from the seven letter results (C, A, N, S, L, I, M)."""
+    """One experience record from the letter results (C, A, N, S, L, I, M) and the technical layer (T)."""
 
     from canslim_score_v1 import build_canslim_score
 
@@ -62,7 +62,8 @@ def build_record(ticker: str, results: tuple) -> dict:
         "data_status": composite["data_status"],
         "entry_bar_date": n_contract.get("last_bar_date"),
         "entry_close": n_contract.get("close_last"),
-        "payload": _plain({"letters": letters, "composite": composite}),
+        "payload": _plain({"letters": letters, "composite": composite,
+                           "technical": results[7] if len(results) > 7 else None}),
         "market": _plain(market),
     }
 

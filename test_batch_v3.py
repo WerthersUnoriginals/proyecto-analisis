@@ -145,5 +145,17 @@ class BatchTests(unittest.TestCase):
         self.assertEqual([item["ticker"] for item in summary["ranking"]], ["TOP", "LOW"])
         self.assertEqual(summary["canslim_verdict"], Counter({"CANDIDATE": 2}))
 
+    def test_entry_setup_needs_a_canslim_candidate_and_a_ready_entry_phase(self):
+        from database.batch_v3 import _t_fields
+
+        ready = {"contract": {"score_final": 4, "layer1_ok": True, "setup_type": "COMPRESSION_BASE",
+                              "momentum": "N/A", "t_data_integrity": "VERIFIED", "entry_phase_ready": True}}
+        candidate = {"canslim_letters_passed": 6, "canslim_data_status": "OK"}
+        self.assertTrue(_t_fields(ready, candidate)["entry_setup"])
+        self.assertFalse(_t_fields(ready, {**candidate, "canslim_letters_passed": 5})["entry_setup"])
+        self.assertFalse(_t_fields(ready, {**candidate, "canslim_data_status": "REVIEW"})["entry_setup"])
+        not_ready = {"contract": {**ready["contract"], "entry_phase_ready": False}}
+        self.assertFalse(_t_fields(not_ready, candidate)["entry_setup"])
+
 if __name__ == "__main__":
     unittest.main()

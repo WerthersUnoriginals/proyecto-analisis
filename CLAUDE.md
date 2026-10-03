@@ -80,7 +80,15 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   al SPY, peor caída, regla −8 %/+20 %) y calibración por veredicto y tramo
   (`python -m database.experience_v1 report`). Línea base:
   `baseline-2026-10-04`. Primeros resultados hacia noviembre de 2026.
-- Pendiente: capa técnica (documento "Score Fase de Entrada v2").
+- **Capa técnica (2026-10-04):** port del indicador "Score Fase de Entrada v2"
+  (`docs/reference/score_fase_entrada_v2.pine`), spec
+  `docs/superpowers/specs/2026-10-04-entry-phase-technical-v2-design.md`.
+  Lookbacks como en el gráfico diario (1 "día" = 1 sesión). Capa de momento de
+  entrada: no cambia la nota conjunta; candidata CAN SLIM + Capa 1 OK + score
+  4-5 = `ENTRY_SETUP`. Verificado contra pandas (diferencia < 1e-13). Ejecución
+  real en `docs/audits/2026-10-04-technical-entry-phase-26-companies.md`.
+- **Plan original completo:** siete letras, puntuación conjunta, Experience
+  Store y capa técnica.
 
 ## Estructura
 
@@ -119,6 +127,8 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
     anclado), `a_contract_v1.py`, `a_v3_runner.py`
     (`python -m database.a_v3_runner AAPL`).
   - Experience Store: `experience_outcomes_v1.py`, `experience_v1.py`.
+  - Capa técnica: `entry_phase_v2.py` (port del Pine), `t_contract_v1.py`,
+    `t_v3_runner.py` (`python -m database.t_v3_runner NVDA`).
   - M: `market_v1.py` (`python -m database.market_v1`: barras de SPY y QQQ),
     `market_direction_v1.py`, `m_contract_v1.py`, `m_v3_runner.py`
     (`python -m database.m_v3_runner`).
@@ -143,10 +153,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~782 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~798 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1 test_n_score_v1 test_supply_demand_v1 test_s_contract_v1 test_relative_strength_v1 test_l_contract_v1 test_sponsorship_v1 test_i_contract_v1 test_market_direction_v1 test_m_contract_v1 test_canslim_score_v1 test_experience_v1
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1 test_n_score_v1 test_supply_demand_v1 test_s_contract_v1 test_relative_strength_v1 test_l_contract_v1 test_sponsorship_v1 test_i_contract_v1 test_market_direction_v1 test_m_contract_v1 test_canslim_score_v1 test_experience_v1 test_entry_phase_v2
 ```
 
 - Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`
