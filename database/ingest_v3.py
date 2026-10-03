@@ -125,6 +125,7 @@ def ingest_company(
     identity = providers_v3.resolve_company(ticker, known_cik=cik, getter=sec_getter)
     company_id = ensure_company(identity, connection_factory=connection_factory)
     steps = [
+        ingest_profile(company_id, identity, clock, connection_factory),
         _ingest_companyfacts(company_id, identity.cik, clock, connection_factory, sec_getter),
         _ingest_submissions(company_id, identity.cik, clock, connection_factory, sec_getter),
     ]
@@ -155,6 +156,28 @@ def ingest_company(
         "outcome": split_result["repository_outcome"],
     })
     return {"ticker": ticker, "company_id": company_id, "cik": identity.cik, "steps": steps}
+
+
+PROFILE_CONTRACT = "sec-company-profile-v1"
+
+
+def ingest_profile(company_id, identity, clock, connection_factory):
+    """Store the SIC code read with the identity (no extra request)."""
+
+    def persist(cursor, payload, started, completed):
+        run_id = evidence_v3.record_run(
+            cursor, company_id=company_id, provider="SEC", operation="sec.company_profile",
+            contract_version=PROFILE_CONTRACT, started_at=started, completed_at=completed,
+            status="SUCCESS", error_code=None, item_count=1, metadata={"cik": payload.cik},
+        )
+        changed = evidence_v3.insert_company_profile(
+            cursor, company_id=company_id, cik=payload.cik, sic=payload.sic,
+            sic_description=payload.sic_description, observed_at=completed, run_id=run_id,
+        )
+        return {"sic": payload.sic, "changed": changed}
+
+    return _run_operation(company_id, "SEC", "sec.company_profile", PROFILE_CONTRACT, lambda: identity, persist,
+                          clock=clock, connection_factory=connection_factory)
 
 
 def _ingest_companyfacts(company_id, cik, clock, connection_factory, sec_getter):

@@ -75,6 +75,14 @@ class SecParsingTests(unittest.TestCase):
             identity_from_submissions(payload, "AAPL", "0001045810")
         self.assertEqual(error.exception.code, "TICKER_NOT_LISTED_FOR_CIK")
 
+    def test_identity_carries_sic(self):
+        from database.providers_v3 import identity_from_submissions
+
+        payload = {"cik": "0000320193", "name": "Apple Inc.", "tickers": ["AAPL"], "exchanges": ["Nasdaq"],
+                   "sic": "3571", "sicDescription": "Electronic Computers"}
+        identity = identity_from_submissions(payload, "AAPL", "0000320193")
+        self.assertEqual((identity.sic, identity.sic_description), ("3571", "Electronic Computers"))
+
     def test_companyfacts_cik_must_match(self):
         with self.assertRaises(ProviderError) as error:
             fetch_companyfacts("0000000001", getter=lambda url: {"cik": 2, "facts": {}})
@@ -278,6 +286,12 @@ class IngestOrchestrationTests(unittest.TestCase):
         db, _ = self.run_ingest()
         items = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.ingestion_run_items")]
         self.assertEqual(len(items), 1)  # three facts deduplicated by the fake to one raw row
+
+    def test_profile_is_recorded_from_the_identity(self):
+        db, result = self.run_ingest()
+        step = next(step for step in result["steps"] if step["operation"] == "sec.company_profile")
+        self.assertEqual(step["status"], "SUCCESS")
+        self.assertTrue(any(sql.startswith("INSERT INTO public.company_profiles") for sql, _ in db.statements))
 
     def test_8k_items_are_stored_with_the_submissions_run(self):
         db, result = self.run_ingest()

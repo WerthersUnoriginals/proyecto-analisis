@@ -56,6 +56,8 @@ class CompanyIdentity:
     cik: str
     name: str
     exchange: str
+    sic: str | None = None
+    sic_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +128,15 @@ def identity_from_submissions(payload: Mapping, ticker: str, cik: str) -> Compan
     exchanges = payload.get("exchanges", [])
     index = tickers.index(wanted)
     exchange = str(exchanges[index]).upper() if index < len(exchanges) and exchanges[index] else ""
-    return CompanyIdentity(ticker=wanted, cik=cik, name=str(payload.get("name", "")), exchange=exchange)
+    return CompanyIdentity(
+        ticker=wanted, cik=cik, name=str(payload.get("name", "")), exchange=exchange,
+        sic=str(payload["sic"]) if payload.get("sic") else None,
+        sic_description=payload.get("sicDescription") or None,
+    )
+
+
+def fetch_sec_tickers(*, getter: Callable | None = None) -> Mapping:
+    return _sec_get_json(SEC_TICKERS_URL, getter)
 
 
 def resolve_company(
@@ -301,3 +311,25 @@ def fetch_yahoo_daily_bars(ticker: str, *, start: date, stock_factory: Callable 
         for stamp, values in frame.iterrows()
     ]
     return {"rows": rows, "currency": currency, "exchange_timezone": timezone_name}
+
+
+def fetch_spy_holdings(*, getter: Callable | None = None) -> bytes:
+    """The official daily SPY holdings xlsx from State Street (spec L §2)."""
+
+    from database.universe_v1 import UNIVERSE_SOURCE_URL
+
+    if getter is not None:
+        return getter(UNIVERSE_SOURCE_URL)
+    import requests
+
+    try:
+        response = requests.get(UNIVERSE_SOURCE_URL, headers={"User-Agent": "Mozilla/5.0 (CAN SLIM Plus research)"},
+                                timeout=60)
+        response.raise_for_status()
+    except requests.HTTPError:
+        raise ProviderError("SSGA_HTTP_ERROR") from None
+    except requests.RequestException:
+        raise ProviderError("SSGA_TRANSPORT_ERROR") from None
+    if not response.content.startswith(b"PK"):
+        raise ProviderError("SSGA_NOT_A_SPREADSHEET")
+    return response.content

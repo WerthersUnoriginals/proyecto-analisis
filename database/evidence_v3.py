@@ -422,3 +422,120 @@ def load_price_bars(company_id: int, as_of: datetime, *, connection_factory: Cal
             )
             for row in cursor.fetchall()
         ]
+
+
+LATEST_PROFILE_SQL = """
+    SELECT cik, sic, sic_description FROM public.company_profiles
+    WHERE company_id = %s ORDER BY observed_at DESC, id DESC LIMIT 1;
+"""
+
+
+def insert_company_profile(cursor, *, company_id: int, cik: str, sic: str | None, sic_description: str | None,
+                           observed_at: datetime, run_id: int) -> bool:
+    """Append the SEC SIC classification when it differs from the latest stored one."""
+
+    cursor.execute(LATEST_PROFILE_SQL, (company_id,))
+    if cursor.fetchone() == (cik, sic, sic_description):
+        return False
+    cursor.execute(
+        """INSERT INTO public.company_profiles (company_id, cik, sic, sic_description, observed_at, run_id)
+           VALUES (%s, %s, %s, %s, %s, %s);""",
+        (company_id, cik, sic, sic_description, observed_at, run_id),
+    )
+    return True
+
+
+LOAD_PROFILES_SQL = """
+    SELECT DISTINCT ON (company_id) company_id, sic, sic_description
+    FROM public.company_profiles
+    WHERE company_id = ANY(%s) AND observed_at <= %s
+    ORDER BY company_id, observed_at DESC, id DESC;
+"""
+
+
+def load_profiles(company_ids, as_of: datetime, *, connection_factory: Callable | None = None) -> dict:
+    """{company_id: (sic, sic_description)} as known at ``as_of``."""
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_PROFILES_SQL, (list(company_ids), as_of))
+        return {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
+
+
+def insert_universe_snapshot(cursor, *, company_id: int, universe: str, holdings_as_of: date, members,
+                             observed_at: datetime, run_id: int) -> int | None:
+    """Store one holdings file; None when that holdings date is already stored."""
+
+    cursor.execute(
+        """INSERT INTO public.universe_snapshots (company_id, universe, holdings_as_of, observed_at, run_id)
+           VALUES (%s, %s, %s, %s, %s) ON CONFLICT (universe, holdings_as_of) DO NOTHING RETURNING id;""",
+        (company_id, universe, holdings_as_of, observed_at, run_id),
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    cursor.executemany(
+        """INSERT INTO public.universe_members (snapshot_id, position, source_ticker, name, identifier, sedol,
+               weight, sector, shares_held, currency) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s);""",
+        [(row[0], item.position, item.source_ticker, item.name, item.identifier, item.sedol, item.weight,
+          item.sector, item.shares_held, item.currency) for item in members],
+    )
+    return row[0]
+
+
+LOAD_UNIVERSE_SQL = """
+    WITH snapshot AS (
+        SELECT id, holdings_as_of FROM public.universe_snapshots
+        WHERE universe = %s AND observed_at <= %s
+        ORDER BY holdings_as_of DESC, observed_at DESC LIMIT 1
+    )
+    SELECT s.holdings_as_of, m.source_ticker
+    FROM snapshot AS s JOIN public.universe_members AS m ON m.snapshot_id = s.id
+    ORDER BY m.position;
+"""
+
+
+def load_universe(universe: str, as_of: datetime, *, connection_factory: Callable | None = None):
+    """(holdings_as_of, [source tickers]) of the latest snapshot observed by ``as_of``."""
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_UNIVERSE_SQL, (universe, as_of))
+        rows = cursor.fetchall()
+    return (rows[0][0], [row[1] for row in rows]) if rows else (None, [])
+
+
+def load_ticker_for_cik(cik: str, *, connection_factory: Callable | None = None) -> str | None:
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT ticker FROM public.companies WHERE cik = %s;", (cik,))
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
+def load_company_ids(tickers, *, connection_factory: Callable | None = None) -> dict:
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute("SELECT ticker, id FROM public.companies WHERE ticker = ANY(%s);", (list(tickers),))
+        return dict(cursor.fetchall())
+
+
+LOAD_MANY_PRICE_BARS_SQL = """
+    SELECT company_id, id, bar_date, open, high, low, close, adj_close, volume, currency, observed_at
+    FROM public.yahoo_price_bars_raw
+    WHERE company_id = ANY(%s) AND observed_at <= %s AND bar_date <= %s
+    ORDER BY company_id, bar_date, observed_at, id;
+"""
+
+
+def load_many_price_bars(company_ids, as_of: datetime, *, connection_factory: Callable | None = None) -> dict:
+    """{company_id: [PriceBar]} visible at ``as_of`` for many companies in one query."""
+
+    from database.prices_v3 import PriceBar
+
+    result: dict = {company_id: [] for company_id in company_ids}
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_MANY_PRICE_BARS_SQL, (list(company_ids), as_of, as_of.date()))
+        for row in cursor.fetchall():
+            result[row[0]].append(PriceBar(
+                bar_date=row[2], open=_plain_decimal(row[3]), high=_plain_decimal(row[4]), low=_plain_decimal(row[5]),
+                close=_plain_decimal(row[6]), adj_close=_plain_decimal(row[7]), volume=int(row[8]),
+                currency=row[9], observed_at=row[10], id=row[1],
+            ))
+    return result

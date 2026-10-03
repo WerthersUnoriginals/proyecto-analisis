@@ -230,6 +230,36 @@ class EvidenceRepositoryIntegrationTests(unittest.TestCase):
                             {"company_id": COMPANY_ID, "as_of": as_of, "since": date(2000, 1, 1)})
         return self.cursor.fetchall()
 
+    def test_profiles_store_only_changes_and_read_point_in_time(self):
+        run = self.run_id()
+        insert = lambda sic, observed: evidence_v3.insert_company_profile(
+            self.cursor, company_id=COMPANY_ID, cik=CIK, sic=sic, sic_description="X", observed_at=observed, run_id=run)
+        before = datetime(1990, 1, 1, tzinfo=UTC)
+        self.assertTrue(insert("9999", before))
+        self.assertFalse(insert("9999", before + timedelta(days=1)))
+        self.cursor.execute(evidence_v3.LOAD_PROFILES_SQL, ([COMPANY_ID], before + timedelta(days=2)))
+        self.assertEqual(self.cursor.fetchall(), [(COMPANY_ID, "9999", "X")])
+
+    def test_universe_snapshot_is_stored_once_per_holdings_date(self):
+        from database.universe_v1 import HoldingRow
+
+        run = self.run_id()
+        members = [HoldingRow(1, "TEST.A", "TEST CO", "000", None, Decimal("1.5"), "Tech", Decimal(10), "USD")]
+        store = lambda: evidence_v3.insert_universe_snapshot(
+            self.cursor, company_id=COMPANY_ID, universe="TEST_UNIVERSE", holdings_as_of=date(2000, 1, 3),
+            members=members, observed_at=OBSERVED, run_id=run)
+        self.assertIsNotNone(store())
+        self.assertIsNone(store())
+        self.cursor.execute(evidence_v3.LOAD_UNIVERSE_SQL, ("TEST_UNIVERSE", OBSERVED))
+        self.assertEqual(self.cursor.fetchall(), [(date(2000, 1, 3), "TEST.A")])
+        self.cursor.execute(evidence_v3.LOAD_UNIVERSE_SQL, ("TEST_UNIVERSE", OBSERVED - timedelta(seconds=1)))
+        self.assertEqual(self.cursor.fetchall(), [])
+
+    def test_ssga_provider_is_allowed(self):
+        evidence_v3.record_run(self.cursor, company_id=COMPANY_ID, provider="SSGA", operation="test.ssga",
+                               contract_version="test-v1", started_at=OBSERVED, completed_at=OBSERVED,
+                               status="SUCCESS", error_code=None)
+
 
 if __name__ == "__main__":
     unittest.main()

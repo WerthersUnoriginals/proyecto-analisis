@@ -1,4 +1,4 @@
-"""Batch ingestion and C/A/N/S evaluation of many companies.
+"""Batch ingestion and C/A/N/S/L evaluation of many companies.
 
 Usage::
 
@@ -25,13 +25,14 @@ def _default_evaluate(ticker: str, as_of: datetime):
     from database.a_v3_runner import evaluate_a
     from database.c_v3_runner import evaluate_c_v3
     from database.n_v3_runner import evaluate_n
+    from database.l_v3_runner import evaluate_l
     from database.s_v3_runner import evaluate_s
 
     company = evidence_v3.load_company(ticker)
     if company is None:
         raise LookupError(f"ticker not ingested: {ticker}")
     return (evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of), evaluate_n(company[0], as_of),
-            evaluate_s(company[0], as_of))
+            evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of))
 
 
 def _default_ingest(ticker: str):
@@ -74,8 +75,24 @@ def _s_fields(s_result: dict | None) -> dict:
     }
 
 
+def _l_fields(l_result: dict | None) -> dict:
+    if l_result is None:
+        return {}
+    contract, score = l_result["contract"], l_result["score"]
+    return {
+        "l_score": score["l_score_v1"]["normalized_score"],
+        "l_usability": score["l_score_v1"]["usability"],
+        "l_classic": score["l_classic"]["result"],
+        "l_data_integrity": contract["l_data_integrity"],
+        "l_rs_rating": contract["rs_rating"],
+        "l_group": contract["group_key"],
+        "l_group_rank_pct": contract["group_rank_pct"],
+        "l_diagnostics": contract["integrity"]["diagnostics"],
+    }
+
+
 def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None,
-         s_result: dict | None = None) -> dict:
+         s_result: dict | None = None, l_result: dict | None = None) -> dict:
     c_contract, c_score = c_result["contract"], c_result["score"]
     a_contract, a_score = a_result["contract"], a_result["score"]
     return {
@@ -95,6 +112,7 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
         "a_diagnostics": a_contract["integrity"]["diagnostics"],
         **_n_fields(n_result),
         **_s_fields(s_result),
+        **_l_fields(l_result),
     }
 
 
@@ -150,10 +168,12 @@ def summarize(rows: list[dict]) -> dict:
         "n_classic": Counter(row.get("n_classic") for row in ok if "n_classic" in row),
         "s_data_integrity": Counter(row.get("s_data_integrity") for row in ok if "s_data_integrity" in row),
         "s_classic": Counter(row.get("s_classic") for row in ok if "s_classic" in row),
+        "l_data_integrity": Counter(row.get("l_data_integrity") for row in ok if "l_data_integrity" in row),
+        "l_classic": Counter(row.get("l_classic") for row in ok if "l_classic" in row),
         "diagnostics": Counter(
             item.split(":")[0] for row in ok
             for item in row["c_diagnostics"] + row["a_diagnostics"] + row.get("n_diagnostics", [])
-            + row.get("s_diagnostics", [])
+            + row.get("s_diagnostics", []) + row.get("l_diagnostics", [])
         ),
     }
 
@@ -163,7 +183,7 @@ def _pct(value) -> str:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Batch C/A/N/S evaluation")
+    parser = argparse.ArgumentParser(description="Batch C/A/N/S/L evaluation")
     parser.add_argument("tickers", nargs="*")
     parser.add_argument("--file", help="text file with one ticker per line")
     parser.add_argument("--ingest", action="store_true", help="ingest each ticker before evaluating")
@@ -191,7 +211,8 @@ def main(argv=None):
                   f"A {row['a_score']!s:>6} {row['a_classic']:22} {row['a_data_integrity']:32} "
                   f"N {row.get('n_score')!s:>6} {_pct(row.get('n_pct_below_high_52w')):>6} "
                   f"{row.get('n_classic') or '':18} {row.get('n_data_integrity', ''):32} "
-                  f"S {row.get('s_score')!s:>6} {row.get('s_classic') or '':18} {row.get('s_data_integrity', '')}")
+                  f"S {row.get('s_score')!s:>6} {row.get('s_classic') or '':18} {row.get('s_data_integrity', ''):32} "
+                  f"L {row.get('l_rs_rating')!s:>3} {row.get('l_score')!s:>6} {row.get('l_classic') or ''}")
     print(json.dumps(summary, indent=2, default=dict))
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},

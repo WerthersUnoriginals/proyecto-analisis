@@ -108,7 +108,12 @@ class RunnerTests(unittest.TestCase):
                      adj_close=item.close, volume=1000, currency="USD", observed_at=item.observed_at)
             for item in long_series()
         ]
-        with mock.patch.object(evidence_v3, "load_sec_facts", return_value=[]),                 mock.patch.object(evidence_v3, "load_price_bars", return_value=raw),                 mock.patch.object(evidence_v3, "load_filing_forms", return_value=[("10-K", date(2026, 2, 1))]),                 mock.patch.object(evidence_v3, "load_catalyst_filings", return_value=[]):
+        with (
+            mock.patch.object(evidence_v3, "load_sec_facts", return_value=[]),
+            mock.patch.object(evidence_v3, "load_price_bars", return_value=raw),
+            mock.patch.object(evidence_v3, "load_filing_forms", return_value=[("10-K", date(2026, 2, 1))]),
+            mock.patch.object(evidence_v3, "load_catalyst_filings", return_value=[]),
+        ):
             result = evaluate_n(1, datetime(2026, 10, 3, 12, tzinfo=UTC), capture_loader=lambda company, as_of: (None, []))
         contract = result["contract"]
         self.assertEqual(contract["pct_below_high_52w"], 5.0)
