@@ -51,7 +51,14 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   oficiales del SPY, ~500 empresas ingeridas), grupo SIC de 2 dígitos, línea RS
   frente al SPY. Ejecución real en `docs/audits/2026-10-03-l-live-26-companies.md`.
   L Score v1 (`l-1.0-exp`, pesos aprobados).
-- I, M, capa técnica, Experience Store: sin empezar.
+- **I — Institutional Sponsorship (2026-10-03):** spec
+  `docs/superpowers/specs/2026-10-03-institutional-i-v1-design.md`. Fondos 13F
+  (conjuntos de datos oficiales de SEC, 5 trimestres) y su tendencia, % de
+  propiedad institucional; CUSIP oficial del SPY o por nombre (marcado);
+  discontinuidades de CUSIP a revisión. Ejecución real en
+  `docs/audits/2026-10-03-i-live-26-companies.md`. I Score v1 (`i-1.0-exp`,
+  pesos aprobados; clásico falla si los fondos caen más de un 1 %).
+- M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
 
@@ -64,6 +71,7 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 - `s_score_v1.py` — S Score v1: acciones, deuda y volumen; resultado clásico
   (distribución, dilución, deuda creciente).
 - `l_score_v1.py` — L Score v1: RS Rating, grupo, línea RS; clásico RS ≥ 80.
+- `i_score_v1.py` — I Score v1: fondos, tendencia y propiedad; tolerancia 1 %.
 - `c_score_v13.py` — C Score v1.3, usado por C v3: una pérdida es evidencia
   desfavorable, no dato ausente (spec `2026-10-02-c-score-v1-3-design.md`).
   Mismos pesos y umbrales que v1.2.
@@ -86,6 +94,9 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   - A: `annual_v3.py` (años fiscales reales, ROE sobre patrimonio medio, CAGR
     anclado), `a_contract_v1.py`, `a_v3_runner.py`
     (`python -m database.a_v3_runner AAPL`).
+  - I: `institutional_v1.py` (`python -m database.institutional_v1`: 13F de SEC
+    y resolución de CUSIP), `sponsorship_v1.py`, `i_contract_v1.py`,
+    `i_v3_runner.py` (`python -m database.i_v3_runner NVDA`).
   - L: `universe_v1.py` (`python -m database.universe_v1`: posiciones del SPY,
     perfiles SIC y barras del universo), `relative_strength_v1.py`,
     `l_contract_v1.py`, `l_v3_runner.py` (`python -m database.l_v3_runner NVDA`).
@@ -104,10 +115,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~703 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~734 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1 test_n_score_v1 test_supply_demand_v1 test_s_contract_v1 test_relative_strength_v1 test_l_contract_v1
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1 test_n_score_v1 test_supply_demand_v1 test_s_contract_v1 test_relative_strength_v1 test_l_contract_v1 test_sponsorship_v1 test_i_contract_v1
 ```
 
 - Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`

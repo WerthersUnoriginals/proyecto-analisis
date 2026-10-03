@@ -426,15 +426,15 @@ def load_price_bars(company_id: int, as_of: datetime, *, connection_factory: Cal
 
 LATEST_PROFILE_SQL = """
     SELECT cik, sic, sic_description FROM public.company_profiles
-    WHERE company_id = %s ORDER BY observed_at DESC, id DESC LIMIT 1;
+    WHERE company_id = %s AND observed_at <= %s ORDER BY observed_at DESC, id DESC LIMIT 1;
 """
 
 
 def insert_company_profile(cursor, *, company_id: int, cik: str, sic: str | None, sic_description: str | None,
                            observed_at: datetime, run_id: int) -> bool:
-    """Append the SEC SIC classification when it differs from the latest stored one."""
+    """Append the SEC SIC classification when it differs from the latest one observed by then."""
 
-    cursor.execute(LATEST_PROFILE_SQL, (company_id,))
+    cursor.execute(LATEST_PROFILE_SQL, (company_id, observed_at))
     if cursor.fetchone() == (cik, sic, sic_description):
         return False
     cursor.execute(
@@ -539,3 +539,107 @@ def load_many_price_bars(company_ids, as_of: datetime, *, connection_factory: Ca
                 currency=row[9], observed_at=row[10], id=row[1],
             ))
     return result
+
+
+def dataset_13f_stored(cursor, file_name: str, sha256: str) -> bool:
+    cursor.execute("SELECT 1 FROM public.sec_13f_datasets WHERE file_name = %s AND sha256 = %s;", (file_name, sha256))
+    return cursor.fetchone() is not None
+
+
+def insert_13f_dataset(cursor, *, file_name: str, sha256: str, size_bytes: int, observed_at: datetime) -> int:
+    cursor.execute(
+        """INSERT INTO public.sec_13f_datasets (file_name, sha256, size_bytes, observed_at)
+           VALUES (%s, %s, %s, %s) RETURNING id;""",
+        (file_name, sha256, size_bytes, observed_at),
+    )
+    return cursor.fetchone()[0]
+
+
+def insert_13f_filings(cursor, *, dataset_id: int, filings) -> int:
+    """Store submissions not seen before (an accession is stored once)."""
+
+    before = cursor.execute("SELECT COUNT(*) FROM public.sec_13f_filings;").fetchone()[0]
+    cursor.executemany(
+        """INSERT INTO public.sec_13f_filings (accession, dataset_id, filer_cik, filing_date, submission_type,
+               period_of_report, amendment_type) VALUES (%s, %s, %s, %s, %s, %s, %s)
+           ON CONFLICT (accession) DO NOTHING;""",
+        [(item.accession, dataset_id, item.filer_cik, item.filing_date, item.submission_type, item.period_of_report,
+          item.amendment_type) for item in filings],
+    )
+    return cursor.execute("SELECT COUNT(*) FROM public.sec_13f_filings;").fetchone()[0] - before
+
+
+def insert_13f_holdings(cursor, *, dataset_id: int, holdings) -> int:
+    """Bulk-load tracked rows through a temporary table; existing (accession, row) pairs are kept."""
+
+    cursor.execute(
+        """CREATE TEMP TABLE IF NOT EXISTS sec_13f_holdings_load (LIKE public.sec_13f_holdings) ON COMMIT DROP;"""
+    )
+    with cursor.copy(
+        "COPY sec_13f_holdings_load (accession, infotable_sk, dataset_id, cusip, name_of_issuer, title_of_class, "
+        "value, shares, shares_type, put_call) FROM STDIN"
+    ) as copy:
+        for item in holdings:
+            copy.write_row((item.accession, item.infotable_sk, dataset_id, item.cusip, item.name_of_issuer,
+                            item.title_of_class, item.value, item.shares, item.shares_type, item.put_call))
+    cursor.execute(
+        """INSERT INTO public.sec_13f_holdings SELECT l.* FROM sec_13f_holdings_load AS l
+           WHERE EXISTS (SELECT 1 FROM public.sec_13f_filings AS f WHERE f.accession = l.accession)
+           ON CONFLICT (accession, infotable_sk) DO NOTHING;"""
+    )
+    inserted = cursor.rowcount
+    cursor.execute("DROP TABLE sec_13f_holdings_load;")
+    return inserted
+
+
+LATEST_CUSIP_SQL = """
+    SELECT cusip, source FROM public.company_cusips
+    WHERE company_id = %s AND observed_at <= %s ORDER BY observed_at DESC, id DESC LIMIT 1;
+"""
+
+
+def insert_company_cusip(cursor, *, company_id: int, cusip: str | None, source: str, evidence: Mapping,
+                         observed_at: datetime) -> bool:
+    cursor.execute(LATEST_CUSIP_SQL, (company_id, observed_at))
+    if cursor.fetchone() == (cusip, source):
+        return False
+    cursor.execute(
+        """INSERT INTO public.company_cusips (company_id, cusip, source, evidence, observed_at)
+           VALUES (%s, %s, %s, %s, %s);""",
+        (company_id, cusip, source, _jsonb(dict(evidence)), observed_at),
+    )
+    return True
+
+
+def load_company_cusip(company_id: int, as_of: datetime, *, connection_factory: Callable | None = None):
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LATEST_CUSIP_SQL, (company_id, as_of))
+        return cursor.fetchone() or (None, None)
+
+
+LOAD_13F_FILINGS_SQL = """
+    SELECT f.accession, f.filer_cik, f.filing_date, f.submission_type, f.period_of_report, f.amendment_type
+    FROM public.sec_13f_filings AS f JOIN public.sec_13f_datasets AS d ON d.id = f.dataset_id
+    WHERE f.period_of_report = ANY(%s) AND f.filing_date <= %s AND d.observed_at <= %s;
+"""
+
+LOAD_13F_HOLDINGS_SQL = """
+    SELECT h.accession, h.infotable_sk, h.cusip, h.name_of_issuer, h.title_of_class, h.value, h.shares,
+           h.shares_type, h.put_call
+    FROM public.sec_13f_holdings AS h JOIN public.sec_13f_datasets AS d ON d.id = h.dataset_id
+    WHERE h.cusip = %s AND d.observed_at <= %s;
+"""
+
+
+def load_13f(cusip: str, periods, as_of: datetime, *, connection_factory: Callable | None = None):
+    """(filings of the periods, holdings of the CUSIP) visible at ``as_of``."""
+
+    from database.sponsorship_v1 import Filing13F, Holding13F
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_13F_FILINGS_SQL, (list(periods), as_of.date(), as_of))
+        filings = [Filing13F(*row) for row in cursor.fetchall()]
+        cursor.execute(LOAD_13F_HOLDINGS_SQL, (cusip, as_of))
+        holdings = [Holding13F(row[0], row[1], row[2], row[3], row[4], _plain_decimal(row[5]),
+                               _plain_decimal(row[6]), row[7], row[8]) for row in cursor.fetchall()]
+    return filings, holdings

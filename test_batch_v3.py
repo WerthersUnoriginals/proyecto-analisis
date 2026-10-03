@@ -109,6 +109,18 @@ class BatchTests(unittest.TestCase):
         self.assertNotIn("n_score", rows[0])
         self.assertEqual(summarize(rows)["l_classic"], Counter({"PASS": 1}))
 
+    def test_i_fields_are_added_when_evaluated(self):
+        i_contract = {"i_data_integrity": "VERIFIED", "holders_latest": 900, "holders_change_qoq_pct": 3.0,
+                      "institutional_ownership_pct": 70.0, "integrity": {"diagnostics": ["CUSIP_FROM_NAME_MATCH"]}}
+        i_score = {"i_score_v1": {"normalized_score": 81.0, "usability": "I_SCORE_USABLE"},
+                   "i_classic": {"result": "PASS"}}
+        rows = run_batch(["A"], as_of=AS_OF, evaluate=lambda ticker, as_of: (
+            *fake_result(70.0), None, None, None, {"contract": i_contract, "score": i_score}))
+        self.assertEqual((rows[0]["i_holders"], rows[0]["i_classic"]), (900, "PASS"))
+        summary = summarize(rows)
+        self.assertEqual(summary["i_classic"], Counter({"PASS": 1}))
+        self.assertEqual(summary["diagnostics"]["CUSIP_FROM_NAME_MATCH"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

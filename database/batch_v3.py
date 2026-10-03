@@ -1,4 +1,4 @@
-"""Batch ingestion and C/A/N/S/L evaluation of many companies.
+"""Batch ingestion and C/A/N/S/L/I evaluation of many companies.
 
 Usage::
 
@@ -25,6 +25,7 @@ def _default_evaluate(ticker: str, as_of: datetime):
     from database.a_v3_runner import evaluate_a
     from database.c_v3_runner import evaluate_c_v3
     from database.n_v3_runner import evaluate_n
+    from database.i_v3_runner import evaluate_i
     from database.l_v3_runner import evaluate_l
     from database.s_v3_runner import evaluate_s
 
@@ -32,7 +33,7 @@ def _default_evaluate(ticker: str, as_of: datetime):
     if company is None:
         raise LookupError(f"ticker not ingested: {ticker}")
     return (evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of), evaluate_n(company[0], as_of),
-            evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of))
+            evaluate_s(company[0], as_of), evaluate_l(company[0], ticker, as_of), evaluate_i(company[0], as_of))
 
 
 def _default_ingest(ticker: str):
@@ -91,8 +92,24 @@ def _l_fields(l_result: dict | None) -> dict:
     }
 
 
+def _i_fields(i_result: dict | None) -> dict:
+    if i_result is None:
+        return {}
+    contract, score = i_result["contract"], i_result["score"]
+    return {
+        "i_score": score["i_score_v1"]["normalized_score"],
+        "i_usability": score["i_score_v1"]["usability"],
+        "i_classic": score["i_classic"]["result"],
+        "i_data_integrity": contract["i_data_integrity"],
+        "i_holders": contract["holders_latest"],
+        "i_holders_qoq_pct": contract["holders_change_qoq_pct"],
+        "i_ownership_pct": contract["institutional_ownership_pct"],
+        "i_diagnostics": contract["integrity"]["diagnostics"],
+    }
+
+
 def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None,
-         s_result: dict | None = None, l_result: dict | None = None) -> dict:
+         s_result: dict | None = None, l_result: dict | None = None, i_result: dict | None = None) -> dict:
     c_contract, c_score = c_result["contract"], c_result["score"]
     a_contract, a_score = a_result["contract"], a_result["score"]
     return {
@@ -113,6 +130,7 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
         **_n_fields(n_result),
         **_s_fields(s_result),
         **_l_fields(l_result),
+        **_i_fields(i_result),
     }
 
 
@@ -170,10 +188,12 @@ def summarize(rows: list[dict]) -> dict:
         "s_classic": Counter(row.get("s_classic") for row in ok if "s_classic" in row),
         "l_data_integrity": Counter(row.get("l_data_integrity") for row in ok if "l_data_integrity" in row),
         "l_classic": Counter(row.get("l_classic") for row in ok if "l_classic" in row),
+        "i_data_integrity": Counter(row.get("i_data_integrity") for row in ok if "i_data_integrity" in row),
+        "i_classic": Counter(row.get("i_classic") for row in ok if "i_classic" in row),
         "diagnostics": Counter(
             item.split(":")[0] for row in ok
             for item in row["c_diagnostics"] + row["a_diagnostics"] + row.get("n_diagnostics", [])
-            + row.get("s_diagnostics", []) + row.get("l_diagnostics", [])
+            + row.get("s_diagnostics", []) + row.get("l_diagnostics", []) + row.get("i_diagnostics", [])
         ),
     }
 
@@ -183,7 +203,7 @@ def _pct(value) -> str:
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Batch C/A/N/S/L evaluation")
+    parser = argparse.ArgumentParser(description="Batch C/A/N/S/L/I evaluation")
     parser.add_argument("tickers", nargs="*")
     parser.add_argument("--file", help="text file with one ticker per line")
     parser.add_argument("--ingest", action="store_true", help="ingest each ticker before evaluating")
@@ -212,7 +232,8 @@ def main(argv=None):
                   f"N {row.get('n_score')!s:>6} {_pct(row.get('n_pct_below_high_52w')):>6} "
                   f"{row.get('n_classic') or '':18} {row.get('n_data_integrity', ''):32} "
                   f"S {row.get('s_score')!s:>6} {row.get('s_classic') or '':18} {row.get('s_data_integrity', ''):32} "
-                  f"L {row.get('l_rs_rating')!s:>3} {row.get('l_score')!s:>6} {row.get('l_classic') or ''}")
+                  f"L {row.get('l_rs_rating')!s:>3} {row.get('l_score')!s:>6} {row.get('l_classic') or '':13} "
+                  f"I {row.get('i_score')!s:>6} {row.get('i_classic') or ''}")
     print(json.dumps(summary, indent=2, default=dict))
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},

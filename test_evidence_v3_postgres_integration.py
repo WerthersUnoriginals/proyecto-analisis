@@ -260,6 +260,33 @@ class EvidenceRepositoryIntegrationTests(unittest.TestCase):
                                contract_version="test-v1", started_at=OBSERVED, completed_at=OBSERVED,
                                status="SUCCESS", error_code=None)
 
+    def test_13f_dataset_filings_and_holdings(self):
+        from database.sponsorship_v1 import Filing13F, Holding13F
+
+        dataset = evidence_v3.insert_13f_dataset(self.cursor, file_name="TEST_form13f.zip", sha256="0" * 64,
+                                                 size_bytes=1, observed_at=OBSERVED)
+        self.assertTrue(evidence_v3.dataset_13f_stored(self.cursor, "TEST_form13f.zip", "0" * 64))
+        filing = Filing13F("TEST-13F-1", "0000000001", date(2000, 2, 14), "13F-HR", date(1999, 12, 31), None)
+        self.assertEqual(evidence_v3.insert_13f_filings(self.cursor, dataset_id=dataset, filings=[filing]), 1)
+        self.assertEqual(evidence_v3.insert_13f_filings(self.cursor, dataset_id=dataset, filings=[filing]), 0)
+        rows = [Holding13F("TEST-13F-1", "1", "TESTCUSIP", "TEST CO", "COM", Decimal(10), Decimal(5), "SH", None),
+                Holding13F("TEST-13F-ORPHAN", "1", "TESTCUSIP", "TEST CO", "COM", Decimal(1), Decimal(1), "SH", None)]
+        self.assertEqual(evidence_v3.insert_13f_holdings(self.cursor, dataset_id=dataset, holdings=rows), 1)
+        self.assertEqual(evidence_v3.insert_13f_holdings(self.cursor, dataset_id=dataset, holdings=rows), 0)
+        self.cursor.execute(evidence_v3.LOAD_13F_HOLDINGS_SQL, ("TESTCUSIP", OBSERVED))
+        self.assertEqual(len(self.cursor.fetchall()), 1)
+        self.cursor.execute(evidence_v3.LOAD_13F_HOLDINGS_SQL, ("TESTCUSIP", OBSERVED - timedelta(seconds=1)))
+        self.assertEqual(self.cursor.fetchall(), [])
+
+    def test_company_cusip_stores_changes_only(self):
+        store = lambda cusip, source: evidence_v3.insert_company_cusip(
+            self.cursor, company_id=COMPANY_ID, cusip=cusip, source=source, evidence={}, observed_at=OBSERVED)
+        self.assertTrue(store("TESTCUSI1", "CUSIP_FROM_NAME_MATCH"))
+        self.assertFalse(store("TESTCUSI1", "CUSIP_FROM_NAME_MATCH"))
+        self.expect_database_error(
+            "INSERT INTO public.company_cusips (company_id, cusip, source, observed_at) VALUES (%s, 'X', 'GUESS', now());",
+            (COMPANY_ID,))
+
 
 if __name__ == "__main__":
     unittest.main()
