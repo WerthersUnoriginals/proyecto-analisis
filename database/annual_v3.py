@@ -23,13 +23,14 @@ from database.quarterly_v3 import (
     six_years_before,
     verify_provider_events,
 )
-from database.sec_facts import METRIC_UNITS, SEC_TAG_CATALOG, SecFact, duration_class
+from database.sec_facts import METRIC_UNITS, SEC_TAG_CATALOG, TAG_TO_METRIC, SecFact, duration_class
 from database.split_basis import SplitEvent
 
 ANNUAL_NORMALIZER_VERSION = "sec-annual-v1"
 ANNUAL_METRICS = ("EPS_DILUTED", "REVENUE", "NET_INCOME")
 ANNUAL_FORMS = frozenset({"10-K", "10-K/A"})
 EQUITY_FORMS = frozenset({"10-K", "10-K/A", "10-Q", "10-Q/A"})
+INSTANT_METRICS = ("STOCKHOLDERS_EQUITY",)
 VALUE_WINDOW_DAYS = round(365.25 * 7)
 ROE_PAIRS = (
     ("NetIncomeLoss", "StockholdersEquity"),
@@ -203,8 +204,15 @@ def build_annual_view(
     split_events: Sequence[SplitEvent],
     as_of: datetime,
     window_start: date | None = None,
+    metrics: Sequence[str] = ANNUAL_METRICS,
+    instant_metrics: Sequence[str] = INSTANT_METRICS,
 ) -> AnnualView:
-    """Build the annual view of one company from evidence visible at ``as_of``."""
+    """Build the annual view of one company from evidence visible at ``as_of``.
+
+    ``metrics`` (annual durations) and ``instant_metrics`` (fiscal year-end
+    balances, keyed by tag in ``equity``) default to what A needs; S asks for
+    share counts and debt without changing A's view.
+    """
 
     if as_of.tzinfo is None:
         raise ValueError("as_of must be timezone-aware")
@@ -223,7 +231,7 @@ def build_annual_view(
     for fact in facts:
         metric = fact.metric
         if (
-            metric in ANNUAL_METRICS
+            metric in metrics
             and fact.form in ANNUAL_FORMS
             and fact.unit == METRIC_UNITS[metric]
             and duration_class(fact) == "ANNUAL"
@@ -256,10 +264,10 @@ def build_annual_view(
     equity_groups: dict[tuple[str, date], list[SecFact]] = defaultdict(list)
     for fact in facts:
         if (
-            fact.metric == "STOCKHOLDERS_EQUITY"
+            fact.metric in instant_metrics
             and fact.form in EQUITY_FORMS
             and fact.period_start is None
-            and fact.unit == METRIC_UNITS["STOCKHOLDERS_EQUITY"]
+            and fact.unit == METRIC_UNITS[fact.metric]
             and fact.period_end in year_by_end
             and fact.period_end >= value_floor - timedelta(days=380)
         ):
@@ -268,7 +276,8 @@ def build_annual_view(
     for (tag, on), group in equity_groups.items():
         chosen = _latest_unique_instant(group)
         if chosen is None:
-            acc.diagnostics.append("AMBIGUOUS_EQUITY")
+            acc.diagnostics.append("AMBIGUOUS_EQUITY" if TAG_TO_METRIC.get(tag) == "STOCKHOLDERS_EQUITY"
+                                   else "AMBIGUOUS_INSTANT")
             continue
         equity[tag][on] = EquityValue(
             tag, on, chosen.value, chosen.filed_date, chosen.accession,

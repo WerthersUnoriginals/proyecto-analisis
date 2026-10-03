@@ -15,6 +15,10 @@ Reproduce with `python -m database.batch_v3 <tickers> [--ingest]`.
 - `sec_filing_items`: 13,567 literal items, all 26 companies (the six of
   finding 2 after its fix).
 - PostgreSQL integration tests (11, rolled back) green after the migration.
+- Re-ingestion two hours later stored 2,845 bars again for BAC, JPM and PLD:
+  only `Adj Close` changed (Yahoo recomputed its dividend adjustment); open,
+  high, low, close and volume were identical. A real source change, recorded
+  as such; N does not read `Adj Close`.
 
 ## Results (as_of 2026-10-03T17:44:55Z)
 

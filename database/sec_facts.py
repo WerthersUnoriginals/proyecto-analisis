@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Mapping
 
-CATALOG_VERSION = "sec-tag-catalog-v5"
+CATALOG_VERSION = "sec-tag-catalog-v7"
 
 # Ordered by preference within each metric.
 SEC_TAG_CATALOG: Mapping[str, tuple[str, ...]] = {
@@ -37,10 +37,23 @@ SEC_TAG_CATALOG: Mapping[str, tuple[str, ...]] = {
         "WeightedAverageNumberOfDilutedSharesOutstanding",
         "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
     ),
+    # Basic weighted shares: S falls back to them when a company stopped
+    # tagging diluted shares (XOM since 2013, where both are equal).
+    "BASIC_SHARES": ("WeightedAverageNumberOfSharesOutstandingBasic",),
     "SPLIT_RATIO": ("StockholdersEquityNoteStockSplitConversionRatio1",),
     "STOCKHOLDERS_EQUITY": (
         "StockholdersEquity",
         "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+    ),
+    # Debt components for S (spec 2026-10-03-supply-demand-s-v1 §4). Each tag
+    # is a different concept; S combines them only through fixed definitions.
+    "DEBT": (
+        "LongTermDebt",
+        "LongTermDebtNoncurrent",
+        "LongTermDebtCurrent",
+        "LongTermDebtAndCapitalLeaseObligations",
+        "LongTermDebtAndCapitalLeaseObligationsCurrent",
+        "DebtLongtermAndShorttermCombinedAmount",
     ),
 }
 
@@ -50,8 +63,10 @@ METRIC_UNITS: Mapping[str, str] = {
     "REVENUE": "USD",
     "NET_INCOME": "USD",
     "DILUTED_SHARES": "shares",
+    "BASIC_SHARES": "shares",
     "SPLIT_RATIO": "pure",
     "STOCKHOLDERS_EQUITY": "USD",
+    "DEBT": "USD",
 }
 
 TAG_TO_METRIC: Mapping[str, str] = {

@@ -83,6 +83,21 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(summary["n_data_integrity"], Counter({"VERIFIED": 1}))
         self.assertEqual(summary["diagnostics"]["HIGH_5Y_INSUFFICIENT_HISTORY"], 1)
 
+    def test_s_fields_are_added_when_evaluated(self):
+        s_contract = {"s_data_integrity": "VERIFIED", "shares_change_3y_pct": -4.0, "debt_to_equity_latest": 0.5,
+                      "up_down_volume_ratio_50d": 1.3, "integrity": {"diagnostics": ["NO_DEBT_EVIDENCE"]}}
+        s_score = {"s_score_v1": {"normalized_score": 77.0, "usability": "S_SCORE_USABLE"},
+                   "s_classic": {"result": "PASS"}}
+        n_result = {"contract": {"n_status": "OK", "price_data_integrity": "VERIFIED", "pct_below_high_52w": 1.0,
+                                 "new_high_recent": False, "catalysts": {"counts": {}},
+                                 "integrity": {"diagnostics": []}}}
+        rows = run_batch(["A"], as_of=AS_OF, evaluate=lambda ticker, as_of: (
+            *fake_result(70.0), n_result, {"contract": s_contract, "score": s_score}))
+        self.assertEqual((rows[0]["s_score"], rows[0]["s_classic"], rows[0]["s_volume_ratio"]), (77.0, "PASS", 1.3))
+        summary = summarize(rows)
+        self.assertEqual(summary["s_classic"], Counter({"PASS": 1}))
+        self.assertEqual(summary["diagnostics"]["NO_DEBT_EVIDENCE"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

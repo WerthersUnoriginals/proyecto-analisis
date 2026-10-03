@@ -42,7 +42,9 @@ SELECTION_POLICY_VERSION = "c-quarterly-v3"
 
 QUARTER_METRICS = ("EPS_DILUTED", "REVENUE", "NET_INCOME", "DILUTED_SHARES")
 PER_SHARE_METRICS = frozenset({"EPS_DILUTED"})
-SHARE_COUNT_METRICS = frozenset({"DILUTED_SHARES"})
+SHARE_COUNT_METRICS = frozenset({"DILUTED_SHARES"})  # also used to verify provider splits
+# Converted to the as-of split basis; basic shares are never used to verify splits.
+ADJUSTED_SHARE_COUNT_METRICS = SHARE_COUNT_METRICS | {"BASIC_SHARES"}
 DERIVABLE_Q4_METRICS = frozenset({"REVENUE", "NET_INCOME"})
 CALENDAR_METRICS = frozenset({"EPS_DILUTED", "REVENUE", "NET_INCOME", "DILUTED_SHARES"})
 
@@ -383,7 +385,7 @@ def _yahoo_key(end: date, calendar: FiscalCalendar) -> QuarterKey | None:
 def _adjust(metric: str, value: Decimal, factor: Decimal) -> Decimal:
     if metric in PER_SHARE_METRICS:
         return value / factor
-    if metric in SHARE_COUNT_METRICS:
+    if metric in ADJUSTED_SHARE_COUNT_METRICS:
         return value * factor
     return value
 
@@ -427,7 +429,7 @@ def _resolve_sec_tag_interval(
     certain: list[tuple[SecFact, Decimal, Decimal]] = []
     uncertain: list[SecFact] = []
     for fact in facts:
-        if metric in PER_SHARE_METRICS | SHARE_COUNT_METRICS:
+        if metric in PER_SHARE_METRICS | ADJUSTED_SHARE_COUNT_METRICS:
             hypotheses = _factor_hypotheses(events, fact.filed_date, as_of)
         else:
             hypotheses = [Decimal(1)]
@@ -450,7 +452,7 @@ def _resolve_sec_tag_interval(
         return None
 
     certain.sort(key=lambda item: (item[0].filed_date, item[0].accession))
-    if metric in PER_SHARE_METRICS | SHARE_COUNT_METRICS:
+    if metric in PER_SHARE_METRICS | ADJUSTED_SHARE_COUNT_METRICS:
         for (first, first_value, _), (second, second_value, _) in zip(certain, certain[1:]):
             if (
                 first.accession == second.accession
