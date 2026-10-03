@@ -122,6 +122,23 @@ def _m_fields(m_result: dict | None) -> dict:
     }
 
 
+def _canslim_fields(letters: dict, m_result: dict | None) -> dict:
+    if any(letters[code] is None for code in "NSLI") or m_result is None:
+        return {}
+    from canslim_score_v1 import build_canslim_score
+
+    result = build_canslim_score(letters, m_result)
+    return {
+        "canslim_composite": result["composite_score"],
+        "canslim_letters_passed": result["letters_passed"],
+        "canslim_failed_letters": result["failed_letters"],
+        "canslim_data_status": result["data_status"],
+        "canslim_review_letters": result["review_letters"],
+        "canslim_verdict": result["verdict"],
+        "market_signal": result["market_signal"],
+    }
+
+
 def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None,
          s_result: dict | None = None, l_result: dict | None = None, i_result: dict | None = None,
          m_result: dict | None = None) -> dict:
@@ -147,6 +164,8 @@ def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = No
         **_l_fields(l_result),
         **_i_fields(i_result),
         **_m_fields(m_result),
+        **_canslim_fields({"C": c_result, "A": a_result, "N": n_result, "S": s_result, "L": l_result,
+                           "I": i_result}, m_result),
     }
 
 
@@ -206,6 +225,14 @@ def summarize(rows: list[dict]) -> dict:
         "l_classic": Counter(row.get("l_classic") for row in ok if "l_classic" in row),
         "i_data_integrity": Counter(row.get("i_data_integrity") for row in ok if "i_data_integrity" in row),
         "i_classic": Counter(row.get("i_classic") for row in ok if "i_classic" in row),
+        "canslim_verdict": Counter(row.get("canslim_verdict") for row in ok if "canslim_verdict" in row),
+        "ranking": [
+            {"ticker": row["ticker"], "composite": row["canslim_composite"], "passed": row["canslim_letters_passed"],
+             "failed": row["canslim_failed_letters"], "status": row["canslim_data_status"],
+             "verdict": row["canslim_verdict"]}
+            for row in sorted((row for row in ok if row.get("canslim_composite") is not None),
+                              key=lambda row: row["canslim_composite"], reverse=True)
+        ],
         # M is market-wide: one value for every company at this as_of.
         "market": {key: next((row[key] for row in ok if key in row), None)
                    for key in ("m_market_state", "m_score", "m_classic", "m_data_integrity")},
@@ -253,7 +280,10 @@ def main(argv=None):
                   f"S {row.get('s_score')!s:>6} {row.get('s_classic') or '':18} {row.get('s_data_integrity', ''):32} "
                   f"L {row.get('l_rs_rating')!s:>3} {row.get('l_score')!s:>6} {row.get('l_classic') or '':13} "
                   f"I {row.get('i_score')!s:>6} {row.get('i_classic') or ''}")
-    print(json.dumps(summary, indent=2, default=dict))
+    print(json.dumps({key: value for key, value in summary.items() if key != "ranking"}, indent=2, default=dict))
+    for position, item in enumerate(summary["ranking"], start=1):
+        print(f"{position:3} {item['ticker']:7} {item['composite']:6.2f} {item['passed']}/6 "
+              f"{item['verdict']:31} {item['status']:8} fails: {','.join(item['failed']) or '-'}")
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},
                                              indent=2, default=dict), encoding="utf-8")

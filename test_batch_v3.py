@@ -129,6 +129,21 @@ class BatchTests(unittest.TestCase):
         self.assertEqual({row["m_market_state"] for row in rows}, {"CONFIRMED_UPTREND"})
         self.assertEqual(summarize(rows)["market"]["m_score"], 92.0)
 
+    def test_composite_and_ranking(self):
+        from database.batch_v3 import _canslim_fields
+        from test_canslim_score_v1 import letter, market
+
+        fields = _canslim_fields({code: letter(code, 90.0) for code in "CANSLI"}, market())
+        self.assertEqual((fields["canslim_verdict"], fields["canslim_composite"]), ("CANDIDATE", 90.0))
+        self.assertEqual(_canslim_fields({**{code: letter(code) for code in "CANSL"}, "I": None}, market()), {})
+        rows = [{"ticker": ticker, "error": None, "c_data_integrity": "VERIFIED", "c_usability": "X",
+                 "a_data_integrity": "VERIFIED", "a_classic": "PASS", "c_diagnostics": [], "a_diagnostics": [],
+                 "canslim_composite": composite, "canslim_letters_passed": 6, "canslim_failed_letters": [],
+                 "canslim_data_status": "OK", "canslim_verdict": "CANDIDATE"}
+                for ticker, composite in (("LOW", 50.0), ("TOP", 90.0))]
+        summary = summarize(rows)
+        self.assertEqual([item["ticker"] for item in summary["ranking"]], ["TOP", "LOW"])
+        self.assertEqual(summary["canslim_verdict"], Counter({"CANDIDATE": 2}))
 
 if __name__ == "__main__":
     unittest.main()
