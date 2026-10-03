@@ -287,6 +287,17 @@ class EvidenceRepositoryIntegrationTests(unittest.TestCase):
             "INSERT INTO public.company_cusips (company_id, cusip, source, observed_at) VALUES (%s, 'X', 'GUESS', now());",
             (COMPANY_ID,))
 
+    def test_experience_tables_are_append_only(self):
+        self.cursor.execute(
+            "INSERT INTO public.experience_snapshots (as_of, label) VALUES (%s, 'TEST') RETURNING id;", (OBSERVED,))
+        snapshot = self.cursor.fetchone()[0]
+        self.cursor.execute(
+            """INSERT INTO public.experience_records (snapshot_id, company_id, ticker, verdict, payload)
+               VALUES (%s, %s, 'AAPL', 'WATCH', '{}'::jsonb);""", (snapshot, COMPANY_ID))
+        self.expect_database_error("UPDATE public.experience_records SET verdict = 'CANDIDATE' WHERE snapshot_id = %s;",
+                                   (snapshot,))
+        self.expect_database_error("DELETE FROM public.experience_snapshots WHERE id = %s;", (snapshot,))
+
 
 if __name__ == "__main__":
     unittest.main()
