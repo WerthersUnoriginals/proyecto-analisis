@@ -53,9 +53,12 @@ class BatchTests(unittest.TestCase):
         n_contract = {"n_status": "OK", "price_data_integrity": "VERIFIED", "pct_below_high_52w": 4.2,
                       "new_high_recent": True, "catalysts": {"counts": {"5.02": 1}},
                       "integrity": {"diagnostics": ["HIGH_5Y_INSUFFICIENT_HISTORY"]}}
+        n_score = {"n_score_v1": {"normalized_score": 91.0, "usability": "N_SCORE_USABLE"},
+                   "n_classic": {"result": "PASS"}}
         rows = run_batch(["A"], as_of=AS_OF,
-                         evaluate=lambda ticker, as_of: (*fake_result(70.0), {"contract": n_contract}))
+                         evaluate=lambda ticker, as_of: (*fake_result(70.0), {"contract": n_contract, "score": n_score}))
         self.assertEqual((rows[0]["n_pct_below_high_52w"], rows[0]["n_data_integrity"]), (4.2, "VERIFIED"))
+        self.assertEqual((rows[0]["n_score"], rows[0]["n_classic"]), (91.0, "PASS"))
         summary = summarize(rows)
         self.assertEqual(summary["n_data_integrity"], Counter({"VERIFIED": 1}))
         self.assertEqual(summary["diagnostics"]["HIGH_5Y_INSUFFICIENT_HISTORY"], 1)

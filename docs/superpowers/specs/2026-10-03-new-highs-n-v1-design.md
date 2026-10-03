@@ -1,8 +1,9 @@
 # N — New Highs and SEC Catalysts Design (v1)
 
-**Status:** Approved 2026-10-03 except the N Score v1 weights (§9), which
-await human approval. Steps 1–6 of §10 implemented offline (score excluded);
-migration `2026-10-03_price_bars_v1.sql` written but **not applied**.
+**Status:** Approved 2026-10-03, including the N Score v1 weights (§9).
+Steps 1–6 of §10 implemented offline, N Score v1 included (`n_score_v1.py`,
+`n-1.0-exp`); migration `2026-10-03_price_bars_v1.sql` written but **not
+applied** yet.
 
 **Date:** 2026-10-03
 
@@ -141,7 +142,7 @@ Fields: `as_of`, `last_bar_date`, `close_last`, `high_52w`,
 `n-highs-v1`, `split-basis-v1`, `sec-catalysts-v1`). Null fields carry explicit
 reasons, as in C/A.
 
-## 9. N Score v1 (proposal, needs human approval)
+## 9. N Score v1 (approved 2026-10-03)
 
 **Classic O'Neil result**, in order:
 

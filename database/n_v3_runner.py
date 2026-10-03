@@ -12,6 +12,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from n_score_v1 import build_n_score
 from database import evidence_v3
 from database.annual_v3 import build_annual_view
 from database.c_v3_runner import load_split_reconciliation
@@ -52,7 +53,8 @@ def evaluate_n(company_id: int, as_of: datetime, *, connection_factory: Callable
         rejected_splits=view.rejected_split_events, company_id=company_id, as_of=as_of,
         filer_status=filer_status, catalysts=select_catalysts(filings, as_of),
     )
-    return {"contract": contract, "evidence": {"price_bars": len(bars), "sessions": len(series.bars)}}
+    return {"contract": contract, "score": build_n_score(contract),
+            "evidence": {"price_bars": len(bars), "sessions": len(series.bars)}}
 
 
 def main(argv=None):
@@ -66,13 +68,21 @@ def main(argv=None):
         company = evidence_v3.load_company(ticker)
         if company is None:
             raise SystemExit(f"Ticker not found: {ticker}")
-        contract = evaluate_n(company[0], as_of)["contract"]
+        result = evaluate_n(company[0], as_of)
+        contract, score = result["contract"], result["score"]
         output.append({
             "ticker": ticker.upper(),
             "as_of": contract["as_of"],
             "inputs": {key: contract[key] for key in N_INPUT_KEYS},
             "diagnostics": contract["integrity"]["diagnostics"],
-            "catalysts": contract["catalysts"]["counts"],
+            "score": score["n_score_v1"]["normalized_score"],
+            "class": score["n_score_v1"]["class"],
+            "status": score["n_score_v1"]["status"],
+            "usability": score["n_score_v1"]["usability"],
+            "classic": score["n_classic"]["result"],
+            "flags": score["n_flags"],
+            "points": {name: item["points"] for name, item in score["n_score_v1"]["components"].items()},
+            "catalysts": contract["catalysts"]["events"],
         })
     print(json.dumps(output, indent=2, default=str))
     return output

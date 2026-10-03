@@ -32,9 +32,9 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   offline: `prices_v3.py` (barras Yahoo literales, base = fecha de observación,
   conversión con `split-basis-v1`), `new_highs_v1.py`, `catalysts_v3.py` (8-K
   5.02/2.01, informativos), `n_contract_v1.py`, `n_v3_runner.py`, ingesta
-  `yfinance.daily_bars` e items 8-K. **Pendiente:** aplicar migración
-  `2026-10-03_price_bars_v1`, ingesta/ejecución real y N Score v1 (pesos §9
-  sin aprobar).
+  `yfinance.daily_bars` e items 8-K; N Score v1 (`n_score_v1.py`, `n-1.0-exp`,
+  pesos aprobados). **Pendiente:** aplicar migración
+  `2026-10-03_price_bars_v1` e ingesta/ejecución real.
 - S, L, I, M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
@@ -43,6 +43,8 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 - `c_score_v1.py` — C Score v1.2 (legacy). **No modificar** (byte a byte).
 - `a_score_v1.py` — A Score v1: resultado clásico O'Neil (25%/año, ROE 17%,
   sin años en pérdida) + puntuación graduada 0-100.
+- `n_score_v1.py` — N Score v1: resultado clásico (≤15 % bajo el máximo de 52
+  semanas) + puntuación graduada 0-100; catalizadores sólo como flags.
 - `c_score_v13.py` — C Score v1.3, usado por C v3: una pérdida es evidencia
   desfavorable, no dato ausente (spec `2026-10-02-c-score-v1-3-design.md`).
   Mismos pesos y umbrales que v1.2.
@@ -77,10 +79,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~617 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~629 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1 test_n_score_v1
 ```
 
 - Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`

@@ -116,6 +116,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(contract["split_integrity_status"], "UNKNOWN")
         self.assertEqual(contract["price_data_integrity"], "REVIEW_REQUIRED")
         self.assertEqual(result["evidence"]["sessions"], len(raw))
+        self.assertEqual(result["score"]["n_score_v1"]["status"], "REVIEW_REQUIRED_DATA")
 
 
 if __name__ == "__main__":

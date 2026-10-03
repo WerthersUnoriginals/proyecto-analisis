@@ -40,7 +40,11 @@ def _n_fields(n_result: dict | None) -> dict:
     if n_result is None:
         return {}
     contract = n_result["contract"]
+    score = n_result.get("score")
     return {
+        "n_score": score["n_score_v1"]["normalized_score"] if score else None,
+        "n_usability": score["n_score_v1"]["usability"] if score else None,
+        "n_classic": score["n_classic"]["result"] if score else None,
         "n_status": contract["n_status"],
         "n_data_integrity": contract["price_data_integrity"],
         "n_pct_below_high_52w": contract["pct_below_high_52w"],
@@ -102,6 +106,7 @@ def summarize(rows: list[dict]) -> dict:
         "a_data_integrity": Counter(row["a_data_integrity"] for row in ok),
         "a_classic": Counter(row["a_classic"] for row in ok),
         "n_data_integrity": Counter(row.get("n_data_integrity") for row in ok if "n_data_integrity" in row),
+        "n_classic": Counter(row.get("n_classic") for row in ok if "n_classic" in row),
         "diagnostics": Counter(
             item.split(":")[0] for row in ok
             for item in row["c_diagnostics"] + row["a_diagnostics"] + row.get("n_diagnostics", [])
@@ -133,7 +138,8 @@ def main(argv=None):
         else:
             print(f"{row['ticker']:7} C {row['c_score']!s:>6} {row['c_usability']:15} {row['c_data_integrity']:40} "
                   f"A {row['a_score']!s:>6} {row['a_classic']:22} {row['a_data_integrity']:32} "
-                  f"N {_pct(row.get('n_pct_below_high_52w')):>6} {row.get('n_data_integrity', '')}")
+                  f"N {row.get('n_score')!s:>6} {_pct(row.get('n_pct_below_high_52w')):>6} "
+                  f"{row.get('n_classic') or '':18} {row.get('n_data_integrity', '')}")
     print(json.dumps(summary, indent=2, default=dict))
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},
