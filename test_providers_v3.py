@@ -12,6 +12,7 @@ from database.providers_v3 import (
     ProviderError,
     fetch_companyfacts,
     fetch_filings,
+    fetch_yahoo_daily_bars,
     fetch_yahoo_timeseries,
     fetch_yfinance_income,
     parse_company_tickers,
@@ -124,6 +125,10 @@ class FakeCursor:
         else:
             self.result = []
 
+    def executemany(self, sql, rows):
+        for params in rows:
+            self.execute(sql, params)
+
     def fetchone(self):
         return self.result[0] if self.result else None
 
@@ -184,13 +189,16 @@ class IngestOrchestrationTests(unittest.TestCase):
                 if "companyfacts" in failing:
                     raise ProviderError("SEC_HTTP_ERROR")
                 return payload
+            recent = arrays(("a", "2026-08-26", "", "2026-08-26T20:36:00.000Z", "10-Q"),
+                            ("k", "2026-09-10", "", "2026-09-10T20:05:00.000Z", "8-K"))
+            recent["items"] = ["", "5.02,9.01"]
             return {
                 "cik": "0001045810", "name": "NVIDIA CORP", "tickers": ["NVDA"], "exchanges": ["Nasdaq"],
-                "filings": {"recent": arrays(("a", "2026-08-26", "", "2026-08-26T20:36:00.000Z", "10-Q"))},
+                "filings": {"recent": recent},
             }
         return getter
 
-    def run_ingest(self, failing=(), pending=(), instance=None, registrant_filings=()):
+    def run_ingest(self, failing=(), pending=(), instance=None, registrant_filings=(), stock=None):
         db = FakeDb()
         db.pending = list(pending)
         db.registrant_filings = list(registrant_filings)
@@ -202,12 +210,13 @@ class IngestOrchestrationTests(unittest.TestCase):
         class Stock:
             quarterly_income_stmt = pd.DataFrame()
 
+        stock = stock or Stock()
         self.instance = instance
         result = ingest_v3.ingest_company(
             "NVDA", clock=lambda: next(clock), connection_factory=db.connect,
             sec_getter=self.sec_getter(failing),
             yahoo_fetcher=lambda ticker, types, years: (series, None),
-            stock_factory=lambda ticker: Stock(),
+            stock_factory=lambda ticker: stock,
             split_acquirer=lambda company_id, ticker, as_of: {
                 "acquisition_status": "SUCCESS", "events": (), "repository_outcome": "PERSISTED",
             },
@@ -269,6 +278,60 @@ class IngestOrchestrationTests(unittest.TestCase):
         db, _ = self.run_ingest()
         items = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.ingestion_run_items")]
         self.assertEqual(len(items), 1)  # three facts deduplicated by the fake to one raw row
+
+    def test_8k_items_are_stored_with_the_submissions_run(self):
+        db, result = self.run_ingest()
+        step = next(step for step in result["steps"] if step["operation"] == "sec.submissions")
+        self.assertEqual(step["new_8k_items"], 2)
+        items = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.sec_filing_items")]
+        self.assertEqual([(params[1], params[2]) for params in items], [("k", "5.02"), ("k", "9.01")])
+        contracts = {params[2]: params[3] for params in db.runs()}
+        self.assertEqual(contracts["sec.submissions"], "sec-submissions-v2")
+
+    def test_daily_bars_are_stored_without_the_partial_session(self):
+        db, result = self.run_ingest(stock=PriceStock())
+        step = next(step for step in result["steps"] if step["operation"] == "yfinance.daily_bars")
+        # The clock reads 12:xx UTC on 2026-10-02: the Oct 2 session is still open.
+        self.assertEqual((step["status"], step["items"], step["inserted"], step["partial_bars"]), ("SUCCESS", 2, 2, 1))
+        bars = [params for sql, params in db.statements if sql.startswith("INSERT INTO public.yahoo_price_bars_raw")]
+        self.assertEqual([params[2] for params in bars], [date(2026, 9, 30), date(2026, 10, 1)])
+        self.assertEqual(bars[0][9:11], ("USD", "America/New_York"))
+        run = next(params for params in db.runs() if params[2] == "yfinance.daily_bars")
+        self.assertEqual(run[3], "yahoo-daily-bars-raw-v1")
+
+    def test_price_failure_is_recorded(self):
+        db, result = self.run_ingest()
+        step = next(step for step in result["steps"] if step["operation"] == "yfinance.daily_bars")
+        self.assertEqual((step["status"], step["error_code"]), ("FAILED", "YFINANCE_ERROR"))
+
+
+class PriceStock:
+    quarterly_income_stmt = pd.DataFrame()
+    history_metadata = {"currency": "USD", "exchangeTimezoneName": "America/New_York"}
+
+    def history(self, start, auto_adjust, actions):
+        assert auto_adjust is False
+        index = pd.DatetimeIndex(pd.to_datetime(["2026-09-30", "2026-10-01", "2026-10-02"])).tz_localize("America/New_York")
+        return pd.DataFrame({
+            "Open": [10.0, 11.0, 12.0], "High": [11.0, 12.0, 13.0], "Low": [9.5, 10.5, 11.5],
+            "Close": [10.5, 11.5, 12.5], "Adj Close": [10.4, 11.4, 12.4], "Volume": [100, 200, 300],
+        }, index=index)
+
+
+class DailyBarsProviderTests(unittest.TestCase):
+    def test_rows_and_metadata(self):
+        payload = fetch_yahoo_daily_bars("NVDA", start=date(2020, 10, 2), stock_factory=lambda ticker: PriceStock())
+        self.assertEqual(payload["rows"][0][0], date(2026, 9, 30))
+        self.assertEqual(payload["rows"][0][1]["Close"], 10.5)
+        self.assertEqual((payload["currency"], payload["exchange_timezone"]), ("USD", "America/New_York"))
+
+    def test_missing_metadata_is_a_failure(self):
+        class NoMeta(PriceStock):
+            history_metadata = {}
+
+        with self.assertRaises(ProviderError) as error:
+            fetch_yahoo_daily_bars("NVDA", start=date(2020, 10, 2), stock_factory=lambda ticker: NoMeta())
+        self.assertEqual(error.exception.code, "YAHOO_PRICE_METADATA_MISSING")
 
 
 if __name__ == "__main__":

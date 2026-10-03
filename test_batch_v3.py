@@ -49,6 +49,17 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(summary["c_data_integrity"], Counter({"VERIFIED": 1, "REVIEW_REQUIRED": 1}))
         self.assertEqual(summary["errors"], 0)
 
+    def test_n_fields_are_added_when_evaluated(self):
+        n_contract = {"n_status": "OK", "price_data_integrity": "VERIFIED", "pct_below_high_52w": 4.2,
+                      "new_high_recent": True, "catalysts": {"counts": {"5.02": 1}},
+                      "integrity": {"diagnostics": ["HIGH_5Y_INSUFFICIENT_HISTORY"]}}
+        rows = run_batch(["A"], as_of=AS_OF,
+                         evaluate=lambda ticker, as_of: (*fake_result(70.0), {"contract": n_contract}))
+        self.assertEqual((rows[0]["n_pct_below_high_52w"], rows[0]["n_data_integrity"]), (4.2, "VERIFIED"))
+        summary = summarize(rows)
+        self.assertEqual(summary["n_data_integrity"], Counter({"VERIFIED": 1}))
+        self.assertEqual(summary["diagnostics"]["HIGH_5Y_INSUFFICIENT_HISTORY"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

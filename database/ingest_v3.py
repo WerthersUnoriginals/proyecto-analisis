@@ -26,7 +26,7 @@ from database.sec_facts import CATALOG_VERSION, parse_companyfacts
 from database.sec_xbrl_instance import parse_xbrl_instance
 
 SEC_FACTS_CONTRACT = f"sec-companyfacts-raw-v1/{CATALOG_VERSION}"
-SEC_FILINGS_CONTRACT = "sec-submissions-v1"
+SEC_FILINGS_CONTRACT = "sec-submissions-v2"  # v2 also stores literal 8-K items
 SEC_SUCCESSION_CONTRACT = "sec-succession-v1"
 SUCCESSION_JOINT_WINDOW_DAYS = (30, 400)
 SUCCESSION_MAX_HEADERS = 4
@@ -34,6 +34,8 @@ SUCCESSION_LOOKBACK_DAYS = round(365.25 * 8)
 SEC_INSTANCE_CONTRACT = f"sec-xbrl-instance-v1/{CATALOG_VERSION}"
 INSTANCE_LOOKBACK_DAYS = 730
 YAHOO_CONTRACT = "yahoo-quarterly-raw-v1"
+YAHOO_BARS_CONTRACT = "yahoo-daily-bars-raw-v1"
+YAHOO_BARS_OPERATION = "yfinance.daily_bars"
 
 
 def _utcnow() -> datetime:
@@ -140,6 +142,7 @@ def ingest_company(
     ))
     steps.append(_ingest_yahoo_timeseries(company_id, ticker, clock, connection_factory, yahoo_fetcher))
     steps.append(_ingest_yfinance_income(company_id, ticker, clock, connection_factory, stock_factory))
+    steps.append(_ingest_daily_bars(company_id, ticker, clock, connection_factory, stock_factory))
 
     acquirer = split_acquirer
     if acquirer is None:
@@ -184,7 +187,10 @@ def _ingest_submissions(company_id, cik, clock, connection_factory, sec_getter):
         inserted, existing = evidence_v3.insert_filings(
             cursor, company_id=company_id, cik=cik, filings=filings, observed_at=completed, run_id=run_id,
         )
-        return {"items": len(filings), "inserted": inserted, "existing": existing}
+        new_items = evidence_v3.insert_filing_items(
+            cursor, company_id=company_id, filings=filings, observed_at=completed, run_id=run_id,
+        )
+        return {"items": len(filings), "inserted": inserted, "existing": existing, "new_8k_items": new_items}
 
     return _run_operation(
         company_id, "SEC", "sec.submissions", SEC_FILINGS_CONTRACT,
@@ -348,6 +354,38 @@ def _ingest_yfinance_income(company_id, ticker, clock, connection_factory, stock
         return _persist_yahoo_facts(company_id, YFINANCE_VARIANT, facts, cursor, started, completed)
 
     return _run_operation(company_id, "YAHOO_FINANCE", YFINANCE_VARIANT, YAHOO_CONTRACT, fetch, persist,
+                          clock=clock, connection_factory=connection_factory)
+
+
+def _ingest_daily_bars(company_id, ticker, clock, connection_factory, stock_factory):
+    from database.prices_v3 import bars_from_rows
+    from database.quarterly_v3 import six_years_before
+
+    start = six_years_before(clock().date())
+
+    def fetch():
+        return providers_v3.fetch_yahoo_daily_bars(ticker, start=start, stock_factory=stock_factory)
+
+    def persist(cursor, payload, started, completed):
+        bars, dropped = bars_from_rows(
+            payload["rows"], observed_at=completed,
+            exchange_timezone=payload["exchange_timezone"], currency=payload["currency"],
+        )
+        run_id = evidence_v3.record_run(
+            cursor, company_id=company_id, provider="YAHOO_FINANCE", operation=YAHOO_BARS_OPERATION,
+            contract_version=YAHOO_BARS_CONTRACT, started_at=started, completed_at=completed,
+            status="SUCCESS", error_code=None, item_count=len(bars),
+            metadata={"start": start.isoformat(), "currency": payload["currency"],
+                      "exchange_timezone": payload["exchange_timezone"], **dropped},
+        )
+        inserted, unchanged = evidence_v3.insert_price_bars(
+            cursor, company_id=company_id, ticker=ticker, bars=bars,
+            exchange_timezone=payload["exchange_timezone"], run_id=run_id,
+        )
+        return {"items": len(bars), "inserted": inserted, "unchanged": unchanged,
+                "partial_bars": dropped["partial_bars"], "rejected_bars": len(dropped["rejected_bars"])}
+
+    return _run_operation(company_id, "YAHOO_FINANCE", YAHOO_BARS_OPERATION, YAHOO_BARS_CONTRACT, fetch, persist,
                           clock=clock, connection_factory=connection_factory)
 
 

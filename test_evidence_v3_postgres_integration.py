@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from database import evidence_v3
+from database.prices_v3 import PriceBar
 from database.providers_v3 import FilingRecord
 from database.registrant_v3 import RegistrantLink
 from database.sec_facts import SecFact
@@ -142,6 +143,66 @@ class EvidenceRepositoryIntegrationTests(unittest.TestCase):
         rows = [row for row in self.cursor.fetchall() if row[7] == "TEST-0000000001"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][14], "sec.company_facts")
+
+    def price_bar(self, close="10.5", *, day=date(2000, 12, 29), observed_at=OBSERVED):
+        return PriceBar(bar_date=day, open=Decimal("10"), high=Decimal("11"), low=Decimal("9.5"),
+                        close=Decimal(close), adj_close=Decimal("10.4"), volume=1000, currency="USD",
+                        observed_at=observed_at)
+
+    def test_price_bars_store_only_changes_and_read_point_in_time(self):
+        run = self.run_id()
+        insert = lambda bars: evidence_v3.insert_price_bars(
+            self.cursor, company_id=COMPANY_ID, ticker="AAPL", bars=bars,
+            exchange_timezone="America/New_York", run_id=run)
+        self.assertEqual(insert([self.price_bar()]), (1, 0))
+        later = OBSERVED + timedelta(days=1)
+        self.assertEqual(insert([self.price_bar(observed_at=later)]), (0, 1))
+        self.assertEqual(insert([self.price_bar("10.6", observed_at=later)]), (1, 0))
+        loaded = [bar for bar in self._load_bars(OBSERVED) if bar.bar_date == date(2000, 12, 29)]
+        self.assertEqual([bar.close for bar in loaded], [Decimal("10.5")])
+        loaded = [bar for bar in self._load_bars(later) if bar.bar_date == date(2000, 12, 29)]
+        self.assertEqual([bar.close for bar in loaded], [Decimal("10.5"), Decimal("10.6")])
+
+    def _load_bars(self, as_of):
+        self.cursor.execute(evidence_v3.LOAD_PRICE_BARS_SQL, (COMPANY_ID, as_of, as_of.date()))
+        return [PriceBar(bar_date=row[1], open=row[2], high=row[3], low=row[4], close=evidence_v3._plain_decimal(row[5]),
+                         adj_close=row[6], volume=int(row[7]), currency=row[8], observed_at=row[9], id=row[0])
+                for row in self.cursor.fetchall()]
+
+    def test_price_bar_checks(self):
+        run = self.run_id()
+        base = ("INSERT INTO public.yahoo_price_bars_raw (company_id, ticker, bar_date, open, high, low, close,"
+                " adj_close, volume, currency, exchange_timezone, observed_at, run_id)"
+                " VALUES (%s, 'AAPL', %s, %s, %s, %s, %s, 1, 1, 'USD', 'America/New_York', %s, %s);")
+        # close above high
+        self.expect_database_error(base, (COMPANY_ID, date(2000, 12, 28), 10, 11, 9, 12, OBSERVED, run))
+        # a bar dated after its observation day in exchange time
+        self.expect_database_error(base, (COMPANY_ID, date(2001, 1, 2), 10, 11, 9, 10, OBSERVED, run))
+        evidence_v3.insert_price_bars(self.cursor, company_id=COMPANY_ID, ticker="AAPL", bars=[self.price_bar()],
+                                      exchange_timezone="America/New_York", run_id=run)
+        self.expect_database_error(
+            "UPDATE public.yahoo_price_bars_raw SET close = close WHERE created_at >= now() - interval '1 minute';")
+
+    def test_filing_items_are_stored_once_and_need_their_filing(self):
+        run = self.run_id()
+        filing = FilingRecord("TEST-0000000003", "8-K", date(2000, 6, 1),
+                              datetime(2000, 6, 1, 21, tzinfo=UTC), None, ("5.02", "9.01"))
+        evidence_v3.insert_filings(self.cursor, company_id=COMPANY_ID, cik=CIK, filings=[filing],
+                                   observed_at=OBSERVED, run_id=run)
+        insert = lambda filings: evidence_v3.insert_filing_items(
+            self.cursor, company_id=COMPANY_ID, filings=filings, observed_at=OBSERVED, run_id=run)
+        self.assertEqual(insert([filing]), 2)
+        self.assertEqual(insert([filing]), 0)
+        orphan = FilingRecord("TEST-0000000004", "8-K", date(2000, 6, 1), None, None, ("5.02",))
+        import psycopg
+
+        with self.assertRaises(psycopg.Error):
+            with self.connection.transaction():
+                insert([orphan])
+        self.cursor.execute(evidence_v3.LOAD_CATALYST_FILINGS_SQL,
+                            {"company_id": COMPANY_ID, "as_of": OBSERVED, "since": date(2000, 1, 1)})
+        rows = [row for row in self.cursor.fetchall() if row[1] == "TEST-0000000003"]
+        self.assertEqual([row[5] for row in rows], ["5.02", "9.01"])
 
 
 if __name__ == "__main__":

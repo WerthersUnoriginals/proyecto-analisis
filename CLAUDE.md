@@ -27,7 +27,15 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   catálogo v5 (ventas totales, banca, utilities), XBRL del filing cuando la API
   de SEC va con retraso, sucesiones de registrante (XOM), emisores extranjeros
   excluidos explícitamente, splits del proveedor verificados contra SEC.
-- N, S, L, I, M, capa técnica, Experience Store: sin empezar.
+- **N — New Highs (2026-10-03):** spec
+  `docs/superpowers/specs/2026-10-03-new-highs-n-v1-design.md`. Implementado
+  offline: `prices_v3.py` (barras Yahoo literales, base = fecha de observación,
+  conversión con `split-basis-v1`), `new_highs_v1.py`, `catalysts_v3.py` (8-K
+  5.02/2.01, informativos), `n_contract_v1.py`, `n_v3_runner.py`, ingesta
+  `yfinance.daily_bars` e items 8-K. **Pendiente:** aplicar migración
+  `2026-10-03_price_bars_v1`, ingesta/ejecución real y N Score v1 (pesos §9
+  sin aprobar).
+- S, L, I, M, capa técnica, Experience Store: sin empezar.
 
 ## Estructura
 
@@ -57,6 +65,8 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
   - A: `annual_v3.py` (años fiscales reales, ROE sobre patrimonio medio, CAGR
     anclado), `a_contract_v1.py`, `a_v3_runner.py`
     (`python -m database.a_v3_runner AAPL`).
+  - N: `prices_v3.py`, `new_highs_v1.py`, `catalysts_v3.py`, `n_contract_v1.py`,
+    `n_v3_runner.py` (`python -m database.n_v3_runner NVDA`).
   - `migrations/` — migraciones versionadas `YYYY-MM-DD_nombre_vN.sql`. Nunca editar una existente.
 - `fixtures/` — líneas base congeladas (AAPL) y Company Facts reales recortados
   (AAPL, NVDA, 2026-10-02) para tests offline de v3.
@@ -67,10 +77,10 @@ point-in-time, capa técnica con estados temporales y un Experience Store.
 
 ## Tests
 
-Batería offline (sin red ni PostgreSQL), ~563 tests en segundos:
+Batería offline (sin red ni PostgreSQL), ~617 tests en segundos:
 
 ```bash
-python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3
+python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_data_integrity test_c_dual_run test_c_dual_run_contract test_c_fundamentals_adapter test_c_independent_contract test_c_independent_postgres_integration test_c_live_diagnostic test_c_live_runner test_c_normalized_row_shape test_corporate_action_acquisition test_corporate_action_migration test_corporate_action_postgres_concurrency test_corporate_action_postgres_concurrency_harness test_corporate_action_postgres_repository_integration test_corporate_action_repository test_corporate_actions test_effective_fundamentals test_fundamental_c_snapshot test_fundamentals_effective_schema test_fundamentals_semantics_v2_migration test_normalized_fundamentals test_split_integrity test_validate_fundamentals test_yahoo_import test_sec_facts test_split_basis test_quarterly_v3 test_c_contract_v3 test_providers_v3 test_c_score_v13 test_annual_v3 test_a_contract_v1 test_a_score_v1 test_registrant_v3 test_sec_xbrl_instance test_batch_v3 test_prices_v3 test_new_highs_v1 test_catalysts_v3 test_n_contract_v1
 ```
 
 - Integración PostgreSQL: opt-in con `CANSLIM_RUN_PG_INTEGRATION=1`
@@ -96,6 +106,20 @@ python -m unittest test_backfill_normalized test_backfill_semantics_v2 test_c_da
    en PostgreSQL salvo autorización explícita en la tarea.
 5. Trabajar en `main`.
 6. Antes de entregar: tests offline completos, `git diff --check` y revisión de alcance.
+
+### Autonomía de decisión (2026-10-03)
+
+Decidir con criterio propio y contarlo en el resumen final, sin preguntar antes:
+detalles técnicos de una spec (umbrales de sesiones, ventanas, códigos de
+estado, nombres de módulos y columnas); lecturas de SEC/Yahoo, aplicar
+migraciones nuevas y escribir en PostgreSQL dentro de la tarea en curso (D4);
+ajustes menores que salgan con datos reales, si respetan los principios de datos
+y quedan anotados en la spec; y pasar de spec a plan e implementación TDD sin
+parar, cuando la spec no tenga decisiones de producto abiertas.
+
+Seguir preguntando: commit y push; pesos y umbrales de puntuación; cualquier
+excepción a los principios de datos (PIT, SEC > Yahoo, fail-closed); y
+operaciones destructivas o irreversibles en la base de datos.
 
 ## Convenciones
 

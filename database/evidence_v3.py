@@ -283,3 +283,112 @@ def load_company(ticker: str, *, connection_factory: Callable | None = None) -> 
     if len(rows) > 1:
         raise RuntimeError(f"ticker {ticker} is not unique in companies")
     return rows[0] if rows else None
+
+
+INSERT_FILING_ITEM_SQL = """
+    INSERT INTO public.sec_filing_items (company_id, accession, item, observed_at, run_id)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (company_id, accession, item) DO NOTHING
+    RETURNING id;
+"""
+
+
+def insert_filing_items(
+    cursor, *, company_id: int, filings: Iterable[FilingRecord], observed_at: datetime, run_id: int,
+) -> int:
+    """Store each filing's literal 8-K items once; returns how many were new."""
+
+    inserted = 0
+    for filing in filings:
+        for item in dict.fromkeys(filing.items):
+            cursor.execute(INSERT_FILING_ITEM_SQL, (company_id, filing.accession, item, observed_at, run_id))
+            if cursor.fetchone() is not None:
+                inserted += 1
+    return inserted
+
+
+LOAD_CATALYST_FILINGS_SQL = """
+    SELECT f.cik, f.accession, f.form, f.filing_date, f.acceptance_at, i.item
+    FROM public.sec_filing_items AS i
+    JOIN public.sec_filings AS f ON f.company_id = i.company_id AND f.accession = i.accession
+    WHERE i.company_id = %(company_id)s AND i.observed_at <= %(as_of)s AND f.observed_at <= %(as_of)s
+      AND f.form IN ('8-K', '8-K/A') AND f.filing_date >= %(since)s
+    ORDER BY f.filing_date, f.accession, i.item;
+"""
+
+
+def load_catalyst_filings(company_id: int, as_of: datetime, since: date, *,
+                          connection_factory: Callable | None = None) -> list:
+    from database.catalysts_v3 import CatalystFiling
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_CATALYST_FILINGS_SQL, {"company_id": company_id, "as_of": as_of, "since": since})
+        rows = cursor.fetchall()
+    grouped: dict[str, list] = {}
+    for cik, accession, form, filing_date, acceptance_at, item in rows:
+        grouped.setdefault(accession, [cik, form, filing_date, acceptance_at, []])[4].append(item)
+    return [
+        CatalystFiling(cik=cik, accession=accession, form=form, filing_date=filing_date,
+                       acceptance_at=acceptance_at, items=tuple(items))
+        for accession, (cik, form, filing_date, acceptance_at, items) in grouped.items()
+    ]
+
+
+LOAD_LATEST_PRICE_BARS_SQL = """
+    SELECT DISTINCT ON (bar_date) bar_date, open, high, low, close, adj_close, volume, currency
+    FROM public.yahoo_price_bars_raw
+    WHERE company_id = %s
+    ORDER BY bar_date, observed_at DESC, id DESC;
+"""
+
+INSERT_PRICE_BAR_SQL = """
+    INSERT INTO public.yahoo_price_bars_raw (
+        company_id, ticker, bar_date, open, high, low, close, adj_close, volume,
+        currency, exchange_timezone, observed_at, run_id
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+"""
+
+
+def _bar_values(bar) -> tuple:
+    return (bar.open, bar.high, bar.low, bar.close, bar.adj_close, Decimal(bar.volume), bar.currency)
+
+
+def insert_price_bars(
+    cursor, *, company_id: int, ticker: str, bars: Sequence, exchange_timezone: str, run_id: int,
+) -> tuple[int, int]:
+    """Append bars whose values differ from their latest stored observation."""
+
+    cursor.execute(LOAD_LATEST_PRICE_BARS_SQL, (company_id,))
+    latest = {row[0]: tuple(Decimal(value) for value in row[1:7]) + (row[7],) for row in cursor.fetchall()}
+    changed = [bar for bar in bars if latest.get(bar.bar_date) != _bar_values(bar)]
+    rows = [
+        (company_id, ticker, bar.bar_date, bar.open, bar.high, bar.low, bar.close, bar.adj_close,
+         bar.volume, bar.currency, exchange_timezone, bar.observed_at, run_id)
+        for bar in changed
+    ]
+    if rows:
+        cursor.executemany(INSERT_PRICE_BAR_SQL, rows)
+    return len(rows), len(bars) - len(rows)
+
+
+LOAD_PRICE_BARS_SQL = """
+    SELECT id, bar_date, open, high, low, close, adj_close, volume, currency, observed_at
+    FROM public.yahoo_price_bars_raw
+    WHERE company_id = %s AND observed_at <= %s AND bar_date <= %s
+    ORDER BY bar_date, observed_at, id;
+"""
+
+
+def load_price_bars(company_id: int, as_of: datetime, *, connection_factory: Callable | None = None) -> list:
+    from database.prices_v3 import PriceBar
+
+    with _connect(connection_factory) as connection, connection.cursor() as cursor:
+        cursor.execute(LOAD_PRICE_BARS_SQL, (company_id, as_of, as_of.date()))
+        return [
+            PriceBar(
+                bar_date=row[1], open=_plain_decimal(row[2]), high=_plain_decimal(row[3]),
+                low=_plain_decimal(row[4]), close=_plain_decimal(row[5]), adj_close=_plain_decimal(row[6]),
+                volume=int(row[7]), currency=row[8], observed_at=row[9], id=row[0],
+            )
+            for row in cursor.fetchall()
+        ]

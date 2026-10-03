@@ -65,6 +65,7 @@ class FilingRecord:
     filing_date: date
     acceptance_at: datetime | None
     report_date: date | None
+    items: tuple[str, ...] = ()
 
 
 _last_sec_request = 0.0
@@ -161,7 +162,8 @@ def parse_submission_arrays(arrays: Mapping) -> list[FilingRecord]:
         name: arrays.get(name, [None] * len(accessions))
         for name in ("filingDate", "reportDate", "acceptanceDateTime", "form")
     }
-    if any(len(values) != len(accessions) for values in columns.values()):
+    items = arrays.get("items", [""] * len(accessions))
+    if any(len(values) != len(accessions) for values in (*columns.values(), items)):
         raise ProviderError("SEC_SUBMISSIONS_SHAPE_INVALID")
     records = []
     for index, accession in enumerate(accessions):
@@ -172,6 +174,7 @@ def parse_submission_arrays(arrays: Mapping) -> list[FilingRecord]:
             filing_date=date.fromisoformat(columns["filingDate"][index]),
             acceptance_at=_parse_acceptance(columns["acceptanceDateTime"][index]),
             report_date=date.fromisoformat(report) if report else None,
+            items=tuple(item.strip() for item in (items[index] or "").split(",") if item.strip()),
         ))
     return records
 
@@ -264,3 +267,37 @@ def fetch_yfinance_income(ticker: str, *, stock_factory: Callable | None = None)
     if frame is None or frame.empty:
         raise ProviderError("YFINANCE_EMPTY_RESPONSE")
     return frame
+
+
+YAHOO_PRICE_FIELDS = ("Open", "High", "Low", "Close", "Adj Close", "Volume")
+
+
+def fetch_yahoo_daily_bars(ticker: str, *, start: date, stock_factory: Callable | None = None) -> dict:
+    """Literal daily bars since ``start`` as ``{"rows": [(date, values)], "currency", "exchange_timezone"}``.
+
+    ``auto_adjust=False``: Close is not dividend-adjusted. Yahoo still returns
+    every bar on the split basis of the request date (spec 2026-10-03 §2).
+    """
+
+    try:
+        if stock_factory is None:
+            import yfinance as yf
+
+            stock_factory = yf.Ticker
+        stock = stock_factory(ticker)
+        frame = stock.history(start=start.isoformat(), auto_adjust=False, actions=False)
+        metadata = stock.history_metadata or {}
+    except Exception:  # yfinance raises heterogeneous transport/parsing errors.
+        raise ProviderError("YFINANCE_ERROR") from None
+    if frame is None or frame.empty:
+        raise ProviderError("YFINANCE_EMPTY_RESPONSE")
+    if not set(YAHOO_PRICE_FIELDS) <= set(frame.columns):
+        raise ProviderError("YAHOO_PRICE_COLUMNS_MISSING")
+    currency, timezone_name = metadata.get("currency"), metadata.get("exchangeTimezoneName")
+    if not currency or not timezone_name:
+        raise ProviderError("YAHOO_PRICE_METADATA_MISSING")
+    rows = [
+        (stamp.date(), {name: values[name] for name in YAHOO_PRICE_FIELDS})
+        for stamp, values in frame.iterrows()
+    ]
+    return {"rows": rows, "currency": currency, "exchange_timezone": timezone_name}

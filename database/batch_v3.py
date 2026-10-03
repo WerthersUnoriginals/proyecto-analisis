@@ -1,4 +1,4 @@
-"""Batch ingestion and C/A evaluation of many companies.
+"""Batch ingestion and C/A/N evaluation of many companies.
 
 Usage::
 
@@ -22,11 +22,12 @@ def _default_evaluate(ticker: str, as_of: datetime):
     from database import evidence_v3
     from database.a_v3_runner import evaluate_a
     from database.c_v3_runner import evaluate_c_v3
+    from database.n_v3_runner import evaluate_n
 
     company = evidence_v3.load_company(ticker)
     if company is None:
         raise LookupError(f"ticker not ingested: {ticker}")
-    return evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of)
+    return evaluate_c_v3(company[0], as_of), evaluate_a(company[0], as_of), evaluate_n(company[0], as_of)
 
 
 def _default_ingest(ticker: str):
@@ -35,7 +36,21 @@ def _default_ingest(ticker: str):
     return ingest_company(ticker)
 
 
-def _row(ticker: str, c_result: dict, a_result: dict) -> dict:
+def _n_fields(n_result: dict | None) -> dict:
+    if n_result is None:
+        return {}
+    contract = n_result["contract"]
+    return {
+        "n_status": contract["n_status"],
+        "n_data_integrity": contract["price_data_integrity"],
+        "n_pct_below_high_52w": contract["pct_below_high_52w"],
+        "n_new_high_recent": contract["new_high_recent"],
+        "n_catalysts": contract["catalysts"]["counts"],
+        "n_diagnostics": contract["integrity"]["diagnostics"],
+    }
+
+
+def _row(ticker: str, c_result: dict, a_result: dict, n_result: dict | None = None) -> dict:
     c_contract, c_score = c_result["contract"], c_result["score"]
     a_contract, a_score = a_result["contract"], a_result["score"]
     return {
@@ -53,6 +68,7 @@ def _row(ticker: str, c_result: dict, a_result: dict) -> dict:
         "a_classic": a_score["a_classic"]["result"],
         "a_data_integrity": a_contract["annual_data_integrity"],
         "a_diagnostics": a_contract["integrity"]["diagnostics"],
+        **_n_fields(n_result),
     }
 
 
@@ -69,8 +85,7 @@ def run_batch(
         try:
             if ingest is not None:
                 ingest(ticker)
-            c_result, a_result = evaluate(ticker, as_of)
-            rows.append(_row(ticker, c_result, a_result))
+            rows.append(_row(ticker, *evaluate(ticker, as_of)))
         except Exception as error:  # one company never stops the batch
             rows.append({"ticker": ticker, "error": type(error).__name__,
                          "error_detail": traceback.format_exception_only(error)[-1].strip()[:300]})
@@ -86,14 +101,20 @@ def summarize(rows: list[dict]) -> dict:
         "c_usability": Counter(row["c_usability"] for row in ok),
         "a_data_integrity": Counter(row["a_data_integrity"] for row in ok),
         "a_classic": Counter(row["a_classic"] for row in ok),
+        "n_data_integrity": Counter(row.get("n_data_integrity") for row in ok if "n_data_integrity" in row),
         "diagnostics": Counter(
-            item.split(":")[0] for row in ok for item in row["c_diagnostics"] + row["a_diagnostics"]
+            item.split(":")[0] for row in ok
+            for item in row["c_diagnostics"] + row["a_diagnostics"] + row.get("n_diagnostics", [])
         ),
     }
 
 
+def _pct(value) -> str:
+    return "-" if value is None else f"{value:.1f}%"
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Batch C/A evaluation")
+    parser = argparse.ArgumentParser(description="Batch C/A/N evaluation")
     parser.add_argument("tickers", nargs="*")
     parser.add_argument("--file", help="text file with one ticker per line")
     parser.add_argument("--ingest", action="store_true", help="ingest each ticker before evaluating")
@@ -111,7 +132,8 @@ def main(argv=None):
             print(f"{row['ticker']:7} ERROR {row['error_detail']}")
         else:
             print(f"{row['ticker']:7} C {row['c_score']!s:>6} {row['c_usability']:15} {row['c_data_integrity']:40} "
-                  f"A {row['a_score']!s:>6} {row['a_classic']:22} {row['a_data_integrity']}")
+                  f"A {row['a_score']!s:>6} {row['a_classic']:22} {row['a_data_integrity']:32} "
+                  f"N {_pct(row.get('n_pct_below_high_52w')):>6} {row.get('n_data_integrity', '')}")
     print(json.dumps(summary, indent=2, default=dict))
     if args.out:
         Path(args.out).write_text(json.dumps({"as_of": as_of.isoformat(), "rows": rows, "summary": summary},
